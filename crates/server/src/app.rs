@@ -5,6 +5,7 @@ use axum::{Json, Router};
 use crate::auth::{require_token, AuthToken};
 use crate::config::ServerConfig;
 use crate::db;
+use crate::hosts;
 use crate::ingest;
 
 #[derive(Clone)]
@@ -53,6 +54,8 @@ pub async fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/v1/ping", get(ping))
         .route("/v1/telemetry", post(ingest::ingest))
+        .route("/v1/heartbeat", post(hosts::heartbeat))
+        .route("/v1/hosts", get(hosts::list_hosts))
         .layer(middleware::from_fn_with_state(auth_token, require_token))
         .with_state(state)
 }
