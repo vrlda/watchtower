@@ -6,7 +6,7 @@ use crate::cmd::CommandRunner;
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)] // wired in engine Task 6
 pub struct JournalLine {
-    /// Unix millis (journal __REALTIME_TIMESTAMP taken as-is).
+    /// Unix millis (journal __REALTIME_TIMESTAMP is microseconds; /1000).
     pub ts_ms: i64,
     pub ident: String,
     pub pid: i64,
@@ -31,7 +31,7 @@ pub fn parse_journal(path_or_text: &str) -> Result<Vec<JournalLine>, String> {
         let Some(ts) = v.get("__REALTIME_TIMESTAMP").and_then(|t| t.as_str()) else {
             continue;
         };
-        let Ok(ts_ms) = ts.parse::<i64>() else {
+        let Ok(ts_us) = ts.parse::<i64>() else {
             continue;
         };
         let ident = v
@@ -50,7 +50,7 @@ pub fn parse_journal(path_or_text: &str) -> Result<Vec<JournalLine>, String> {
             .unwrap_or("")
             .to_string();
         out.push(JournalLine {
-            ts_ms,
+            ts_ms: ts_us / 1000,
             ident,
             pid,
             message,
@@ -127,7 +127,7 @@ mod tests {
         fn run(&self, args: &[&str]) -> Result<String, String> {
             assert!(args.contains(&"--since"));
             assert!(args.contains(&"@1758000000"));
-            Ok(r#"{"MESSAGE":"accepted","__REALTIME_TIMESTAMP":"1758000000123","SYSLOG_IDENTIFIER":"sshd"}"#.to_string())
+            Ok(r#"{"MESSAGE":"accepted","__REALTIME_TIMESTAMP":"1758000000123000","SYSLOG_IDENTIFIER":"sshd"}"#.to_string())
         }
     }
 }
