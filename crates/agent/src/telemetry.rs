@@ -4,10 +4,16 @@ use std::path::PathBuf;
 
 use wt_common::{AgentEvent, Heartbeat};
 
-/// JSONL spool: one event per line, appended on failure, replayed on start.
-/// Replay reads and deletes files oldest-first (sorted by filename).
+/// JSONL spool: one event per line, appended on failure. Reads are
+/// non-destructive; files are acked (deleted) only after delivery.
 pub struct Spool {
     dir: PathBuf,
+}
+
+/// One spool file's contents, read non-destructively.
+pub struct SpoolFile {
+    pub path: PathBuf,
+    pub events: Vec<AgentEvent>,
 }
 
 impl Spool {
@@ -28,31 +34,68 @@ impl Spool {
         Ok(())
     }
 
-    /// Read and delete all spool files, oldest first. Unparseable lines are
-    /// skipped (fail-open: never lose the whole spool to one corrupt line).
-    pub fn replay(&self) -> Result<Vec<AgentEvent>, String> {
+    /// Read all spool files oldest-first WITHOUT deleting them. Unreadable
+    /// files are skipped (fail-open); individual corrupt lines are skipped.
+    pub fn read_all(&self) -> Vec<SpoolFile> {
         let mut out = Vec::new();
-        let mut entries: Vec<_> = fs::read_dir(&self.dir)
-            .map_err(|e| e.to_string())?
-            .filter_map(|e| e.ok())
-            .collect();
+        let mut entries: Vec<_> = match fs::read_dir(&self.dir) {
+            Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+            Err(e) => {
+                eprintln!("spool read_dir failed: {e}");
+                Vec::new()
+            }
+        };
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
-            let text = fs::read_to_string(entry.path()).map_err(|e| e.to_string())?;
+            let text = match fs::read_to_string(entry.path()) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("spool skip unreadable {}: {e}", entry.path().display());
+                    continue;
+                }
+            };
+            let mut events = Vec::new();
             for line in text.lines() {
                 if let Ok(ev) = serde_json::from_str::<AgentEvent>(line) {
-                    out.push(ev);
+                    events.push(ev);
                 }
             }
-            fs::remove_file(entry.path()).ok();
+            out.push(SpoolFile { path: entry.path(), events });
         }
-        Ok(out)
+        out
+    }
+
+    /// Delete a spool file — call ONLY after its events were delivered.
+    pub fn ack(&self, path: &std::path::Path) {
+        std::fs::remove_file(path).ok();
+    }
+
+    /// Number of spooled events (non-destructive).
+    pub fn count(&self) -> usize {
+        self.read_all().iter().map(|f| f.events.len()).sum()
     }
 }
 
-pub fn post_batch(url: &str, token: &str, events: &[AgentEvent]) -> Result<(), String> {
+/// Distinguishes retryable failures (transport, 5xx) from permanent ones
+/// (4xx: bad token, bad payload — retrying is pointless).
+#[derive(Debug)]
+pub enum PostError {
+    Transport(String),
+    HttpStatus(u16),
+}
+
+impl std::fmt::Display for PostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PostError::Transport(msg) => write!(f, "transport: {msg}"),
+            PostError::HttpStatus(code) => write!(f, "http {code}"),
+        }
+    }
+}
+
+pub fn post_batch(url: &str, token: &str, events: &[AgentEvent]) -> Result<(), PostError> {
     let body = serde_json::to_string(&serde_json::json!({ "batch": events }))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| PostError::Transport(e.to_string()))?;
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();
@@ -61,15 +104,18 @@ pub fn post_batch(url: &str, token: &str, events: &[AgentEvent]) -> Result<(), S
         .set("Authorization", &format!("Bearer {}", token))
         .set("Content-Type", "application/json")
         .send_string(&body)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => PostError::HttpStatus(code),
+            ureq::Error::Transport(t) => PostError::Transport(t.to_string()),
+        })?;
     if !(200..300).contains(&resp.status()) {
-        return Err(format!("server responded {}", resp.status()));
+        return Err(PostError::HttpStatus(resp.status()));
     }
     Ok(())
 }
 
-pub fn post_heartbeat(url: &str, token: &str, hb: &Heartbeat) -> Result<(), String> {
-    let body = serde_json::to_string(hb).map_err(|e| e.to_string())?;
+pub fn post_heartbeat(url: &str, token: &str, hb: &Heartbeat) -> Result<(), PostError> {
+    let body = serde_json::to_string(hb).map_err(|e| PostError::Transport(e.to_string()))?;
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();
@@ -78,9 +124,12 @@ pub fn post_heartbeat(url: &str, token: &str, hb: &Heartbeat) -> Result<(), Stri
         .set("Authorization", &format!("Bearer {}", token))
         .set("Content-Type", "application/json")
         .send_string(&body)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => PostError::HttpStatus(code),
+            ureq::Error::Transport(t) => PostError::Transport(t.to_string()),
+        })?;
     if !(200..300).contains(&resp.status()) {
-        return Err(format!("server responded {}", resp.status()));
+        return Err(PostError::HttpStatus(resp.status()));
     }
     Ok(())
 }
@@ -111,10 +160,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let spool = Spool::new(dir.clone());
         spool.append(&[sample_event(1), sample_event(2)]).unwrap();
-        let out = spool.replay().unwrap();
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].ts, 1);
-        assert_eq!(out[1].ts, 2);
+        let files = spool.read_all();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].events.len(), 2);
+        assert_eq!(files[0].events[0].ts, 1);
+        assert_eq!(files[0].events[1].ts, 2);
+        spool.ack(&files[0].path);
+        assert!(spool.read_all().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -173,15 +225,45 @@ mod tests {
     }
 
     #[test]
-    fn spool_replay_is_idempotent_after_successful_post() {
+    fn post_batch_reports_http_status_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let url = format!("http://{}", addr);
+        let err = post_batch(&url, "secret-token", &[sample_event(1)]).unwrap_err();
+        assert!(matches!(err, PostError::HttpStatus(500)));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn spool_read_does_not_delete_until_acked() {
         let dir = std::env::temp_dir().join(format!("wt-spool-2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let spool = Spool::new(dir.clone());
         spool.append(&[sample_event(42)]).unwrap();
-        let first = spool.replay().unwrap();
-        let second = spool.replay().unwrap();
-        assert_eq!(first.len(), 1);
-        assert!(second.is_empty());
+        assert_eq!(spool.read_all().len(), 1);
+        assert_eq!(spool.count(), 1);
+        spool.ack(&spool.read_all()[0].path);
+        assert!(spool.read_all().is_empty());
+        assert_eq!(spool.count(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn spool_read_all_skips_unreadable_files() {
+        let dir = std::env::temp_dir().join(format!("wt-spool-3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = Spool::new(dir.clone());
+        std::fs::create_dir_all(dir.join("spool-bad.jsonl")).unwrap();
+        spool.append(&[sample_event(7)]).unwrap();
+        let files = spool.read_all();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].events[0].ts, 7);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

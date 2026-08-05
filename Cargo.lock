@@ -691,6 +691,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "toml",
  "ureq",
  "wt-common",
 ]

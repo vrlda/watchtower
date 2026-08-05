@@ -98,7 +98,7 @@ impl Default for Config {
 
 impl Config {
     pub fn host_id_valid(&self) -> bool {
-        !self.host_id.is_empty() && self.host_id != "auto"
+        !self.host_id.trim().is_empty() && !self.host_id.trim().eq_ignore_ascii_case("auto")
     }
 }
 
@@ -149,6 +149,16 @@ mod tests {
     #[test]
     fn host_id_auto_is_invalid_for_shipping() {
         let cfg = Config::default();
+        assert!(!cfg.host_id_valid());
+    }
+
+    #[test]
+    fn host_id_valid_accepts_real_id_rejects_whitespace() {
+        let cfg = Config { host_id: "abc123".into(), ..Config::default() };
+        assert!(cfg.host_id_valid());
+        let cfg = Config { host_id: "  ".into(), ..Config::default() };
+        assert!(!cfg.host_id_valid());
+        let cfg = Config { host_id: "Auto".into(), ..Config::default() };
         assert!(!cfg.host_id_valid());
     }
 }

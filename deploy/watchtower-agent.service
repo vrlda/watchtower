@@ -1,0 +1,14 @@
+[Unit]
+Description=Watchtower agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/watchtower-agent run
+Restart=always
+RestartSec=5
+NoNewPrivileges=no
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
