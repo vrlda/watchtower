@@ -6,3 +6,5 @@
 {"__REALTIME_TIMESTAMP":"1758000005000000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Accepted password for root from 198.51.100.24 port 51235 ssh2"}
 {"__REALTIME_TIMESTAMP":"1758000006000000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed password for deploy from 192.0.2.55 port 50000 ssh2"}
 {"__REALTIME_TIMESTAMP":"1758000007000000","SYSLOG_IDENTIFIER":"cron","_PID":"4321","MESSAGE":"(root) CMD ( /usr/lib/atop/atop.daily )"}
+{"__REALTIME_TIMESTAMP":"1758000008000000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed password for invalid user root from 203.0.113.7 port 40002 ssh2"}
+{"__REALTIME_TIMESTAMP":"1758000009000000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed keyboard-interactive for deploy from 198.51.100.24 port 51236 ssh2"}
