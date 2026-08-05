@@ -27,13 +27,13 @@ The control plane (`watchtower-server`: incidents, correlation, notifications) i
 Control plane core (`watchtower-server`):
 
     cargo build --release
-    # server.toml: listen, db_url, auth_token, [[probe]] entries
+    # server.toml: listen, db_url, auth_token, [[probes]] entries
     ./target/release/watchtower-server --config /etc/watchtower/server.toml
 
 - API: `POST /v1/telemetry` (idempotent per event id), `POST /v1/heartbeat`,
   `GET /v1/hosts`, `GET /v1/events?host=&kind=&severity=&since=&limit=`
   (ordered by ts desc, id — never arrival order)
-- Uptime probes: `[[probe]] url=... interval_secs=30 fail_threshold=3` →
+- Uptime probes: `[[probes]] url=... interval_secs=30 fail_threshold=3` →
   Critical `HostUnreachable` events after consecutive failures
 - Web UI at `http://127.0.0.1:8787/` (token prompt; evidence expandable).
   Serve from the repo root, or set `WATCHTOWER_UI_DIR` for installed deploys.
