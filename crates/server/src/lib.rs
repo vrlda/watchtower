@@ -3,5 +3,6 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod events;
 pub mod hosts;
 pub mod ingest;
