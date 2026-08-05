@@ -1,0 +1,38 @@
+use std::path::PathBuf;
+
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(name = "watchtower-server", version)]
+struct Cli {
+    /// Path to config file.
+    #[arg(long, default_value = "/etc/watchtower/server.toml")]
+    config: PathBuf,
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+    let cfg = watchtower_server::config::load(&cli.config);
+    let pool = match watchtower_server::db::connect(&cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("db connect failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    let state = watchtower_server::app::AppState::new(pool, cfg.clone()).await;
+    let app = watchtower_server::app::build_app(state).await;
+    let listener = tokio::net::TcpListener::bind(&cfg.listen)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("bind {} failed: {e}", cfg.listen);
+            std::process::exit(1);
+        });
+    eprintln!(
+        "watchtower-server {} listening on {}",
+        env!("CARGO_PKG_VERSION"),
+        cfg.listen
+    );
+    axum::serve(listener, app).await.unwrap();
+}
