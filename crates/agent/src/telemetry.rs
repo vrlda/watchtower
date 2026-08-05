@@ -431,14 +431,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wt-spool-order-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let spool = Spool::new(dir.clone());
-        std::fs::write(dir.join("spool-1000.jsonl"), "{\"old\":true}\n").unwrap();
-        std::fs::write(dir.join("spool-999.jsonl"), "{\"new\":true}\n").unwrap();
+        std::fs::write(dir.join("spool-999.jsonl"), "{\"old\":true}\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(dir.join("spool-1000.jsonl"), "{\"new\":true}\n").unwrap();
         let files = spool.read_all();
         assert_eq!(files.len(), 2);
         assert_eq!(
             files[0].path.file_name().unwrap().to_string_lossy(),
-            "spool-1000.jsonl",
-            "older mtime sorts first despite lexically-smaller name"
+            "spool-999.jsonl",
+            "older mtime sorts first despite lexically-larger name"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
