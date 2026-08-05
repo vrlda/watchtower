@@ -22,6 +22,25 @@ See `docs/specs/product-spec.md` and `docs/specs/architecture.md`.
 
 The control plane (`watchtower-server`: incidents, correlation, notifications) is M2+.
 
+## M2 status
+
+Control plane core (`watchtower-server`):
+
+    cargo build --release
+    # server.toml: listen, db_url, auth_token, [[probe]] entries
+    ./target/release/watchtower-server --config /etc/watchtower/server.toml
+
+- API: `POST /v1/telemetry` (idempotent per event id), `POST /v1/heartbeat`,
+  `GET /v1/hosts`, `GET /v1/events?host=&kind=&severity=&since=&limit=`
+  (ordered by ts desc, id — never arrival order)
+- Uptime probes: `[[probe]] url=... interval_secs=30 fail_threshold=3` →
+  Critical `HostUnreachable` events after consecutive failures
+- Web UI at `http://127.0.0.1:8787/` (token prompt; evidence expandable).
+  Serve from the repo root, or set `WATCHTOWER_UI_DIR` for installed deploys.
+- Integration check: `./scripts/integration-test.sh`
+
+Incidents, correlation, notifications: M4.
+
 ## Known M1 limitations
 
 - Spool is capped at 10 MB (drops new batches with a loud log beyond that; backoff is a fixed 30 s heartbeat-throttle — exponential backoff is M2)

@@ -45,9 +45,10 @@ function render(events) {
       `<div>${fmt(e.ts)} — [${escapeHtml(e.source)}] ${escapeHtml(e.detail)}</div>`).join("");
     el.innerHTML =
       `<div class="top">
-         <span class="badge ${(ev.severity || "info").toLowerCase()}">${ev.severity || "?"}</span>
+         <span class="badge ${(ev.severity || "info").toLowerCase()}">${escapeHtml(ev.severity || "?")}</span>
          <span class="time">${fmt(ev.ts)}</span>
          <span class="summary">${escapeHtml(ev.summary)}</span>
+         <span class="kind">${escapeHtml(ev.kind || "")}</span>
          <span class="host">${escapeHtml(ev.host_id)}</span>
        </div>
        <div class="evidence">${evs}</div>`;
@@ -81,6 +82,7 @@ async function refresh() {
   const status = document.getElementById("status");
   try {
     const events = await loadEvents();
+    if (!events) return; // 401 re-prompt path; next poll retries
     render(events);
     status.textContent = "updated " + fmt(Date.now());
   } catch (e) {

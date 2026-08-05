@@ -128,29 +128,40 @@ impl Spool {
         self.read_all().iter().map(|f| f.events.len()).sum()
     }
 
-    /// Post all spooled files oldest-first. Ack what delivered; drop only
-    /// permanent 4xx failures (except 408/429 which are retryable); keep
-    /// transport/5xx failures spooled and stop the drain.
+    /// Post all spooled files oldest-first, in chunks of at most
+    /// CHUNK_SIZE events so no single request exceeds the server body cap.
+    /// Ack what delivered; drop only permanent 4xx failures (except 408/429);
+    /// keep transport/5xx failures spooled and stop the drain.
     pub fn drain(&self, url: &str, token: &str) -> DrainStats {
+        const CHUNK_SIZE: usize = 512;
         let mut stats = DrainStats::default();
         for file in self.read_all() {
-            match post_batch(url, token, &file.events) {
-                Ok(()) => {
-                    self.ack(&file.path);
-                    stats.delivered += file.events.len();
+            let mut failed = None;
+            for chunk in file.events.chunks(CHUNK_SIZE) {
+                match post_batch(url, token, chunk) {
+                    Ok(()) => stats.delivered += chunk.len(),
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
                 }
-                Err(PostError::HttpStatus(code))
+            }
+            match failed {
+                None => {
+                    self.ack(&file.path);
+                }
+                Some(PostError::HttpStatus(code))
                     if (400..500).contains(&code) && code != 408 && code != 429 =>
                 {
                     eprintln!(
-                        "permanent failure ({}); dropping {} spooled events",
+                        "permanent failure ({}): dropping {} spooled events",
                         code,
                         file.events.len()
                     );
                     self.ack(&file.path);
                     stats.dropped += file.events.len();
                 }
-                Err(e) => {
+                Some(e) => {
                     eprintln!(
                         "drain deferred ({}): {} events stay spooled",
                         e,
@@ -537,6 +548,55 @@ mod tests {
         assert_eq!(stats.dropped, 0);
         assert_eq!(stats.deferred, 1);
         assert_eq!(spool.count(), 1, "429 must stay spooled, not dropped");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_chunks_large_files() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reqs = requests.clone();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                reqs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                    .unwrap();
+                let mut req = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => req.extend_from_slice(&chunk[..n]),
+                        Err(_) => break, // read timeout: client finished sending
+                    }
+                }
+                let _ = String::from_utf8_lossy(&req).into_owned();
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+        let dir = drain_spool_dir("chunks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = Spool::new(dir.clone());
+        let events: Vec<AgentEvent> = (0..1100).map(sample_event).collect();
+        spool.append(&events).unwrap();
+        let stats = spool.drain(&format!("http://{}", addr), "secret-token");
+        handle.join().unwrap();
+        assert_eq!(stats.delivered, 1100);
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(stats.deferred, 0);
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "1100 events must span 3 chunks (512+512+76), not one request"
+        );
+        assert!(spool.read_all().is_empty(), "delivered file must be acked");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
