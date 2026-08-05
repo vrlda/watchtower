@@ -2,6 +2,7 @@ mod cmd;
 mod engine;
 mod procfs;
 mod sensors;
+mod telemetry;
 
 use clap::{Parser, Subcommand};
 

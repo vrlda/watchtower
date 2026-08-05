@@ -124,13 +124,19 @@ pub fn run_once(
     if let Ok(mem) = procfs.meminfo() {
         evs.extend(crate::sensors::resource::mem_events(mem, cfg, host_id, ts));
         evs.extend(crate::sensors::resource::swap_events(mem, cfg, host_id, ts));
+    } else {
+        eprintln!("sensor procfs.meminfo failed");
     }
     if let Ok(load) = procfs.load_one_min() {
         let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         evs.extend(crate::sensors::resource::load_events(load, ncpu, cfg, host_id, ts));
+    } else {
+        eprintln!("sensor procfs.load_one_min failed");
     }
     if let Ok(errs) = procfs.netdev_errors() {
         evs.extend(crate::sensors::resource::netdev_events(&errs, host_id, ts));
+    } else {
+        eprintln!("sensor procfs.netdev_errors failed");
     }
 
     let (total, busy, pct) = crate::sensors::resource::cpu_usage_now(procfs, cpu.total, cpu.busy);
@@ -142,6 +148,8 @@ pub fn run_once(
         for (unit, state) in states {
             crash.observe(&unit, state, (ts / 1000) as u64, host_id, &mut evs);
         }
+    } else {
+        eprintln!("sensor systemctl_list_units failed");
     }
 
     evs.retain(|e| deduper.should_emit(e.kind, &e.key, e.ts));

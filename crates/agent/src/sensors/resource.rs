@@ -14,7 +14,13 @@ pub fn cpu_usage_pct(busy_delta: u64, total_delta: u64) -> f64 {
 /// Sample cpu ticks and compute usage vs the previous sample.
 /// Returns (new_total, new_busy, usage_pct).
 pub fn cpu_usage_now(p: &ProcFs, prev_total: u64, prev_busy: u64) -> (u64, u64, f64) {
-    let (total, idle) = p.cpu_ticks().unwrap_or((prev_total, prev_total.saturating_sub(prev_busy)));
+    let (total, idle) = match p.cpu_ticks() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("sensor procfs.cpu_ticks failed");
+            (prev_total, prev_total.saturating_sub(prev_busy))
+        }
+    };
     let busy = total.saturating_sub(idle);
     if prev_total == 0 {
         return (total, busy, 0.0);
