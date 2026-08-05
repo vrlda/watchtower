@@ -188,6 +188,8 @@ mod tests {
             }
             let req = String::from_utf8_lossy(&req).into_owned();
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
             req
         });
         let url = format!("http://{}", addr);
@@ -215,6 +217,8 @@ mod tests {
             }
             let req = String::from_utf8_lossy(&req).into_owned();
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
             req
         });
         let url = format!("http://{}", addr);
@@ -230,9 +234,21 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+            let mut req = Vec::new();
+            loop {
+                let mut chunk = [0u8; 4096];
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => req.extend_from_slice(&chunk[..n]),
+                    Err(_) => break, // read timeout: client finished sending
+                }
+            }
             stream
                 .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
         });
         let url = format!("http://{}", addr);
         let err = post_batch(&url, "secret-token", &[sample_event(1)]).unwrap_err();
