@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::probes::ProbeConfig;
+
 /// Server configuration. SQLite in dev; Postgres later via the same sqlx API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -13,6 +15,9 @@ pub struct ServerConfig {
     pub db_url: String,
     /// Shared bearer token agents must present. Per-host tokens are M6.
     pub auth_token: String,
+    /// External endpoints to probe for reachability.
+    #[serde(default)]
+    pub probes: Vec<ProbeConfig>,
 }
 
 impl Default for ServerConfig {
@@ -21,6 +26,7 @@ impl Default for ServerConfig {
             listen: "127.0.0.1:8787".into(),
             db_url: "sqlite:///var/lib/watchtower/watchtower.db".into(),
             auth_token: String::new(),
+            probes: Vec::new(),
         }
     }
 }

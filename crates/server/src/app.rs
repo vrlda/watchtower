@@ -8,11 +8,13 @@ use crate::db;
 use crate::events;
 use crate::hosts;
 use crate::ingest;
+use crate::probes::Checker;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::SqlitePool,
     pub cfg: ServerConfig,
+    pub checker: Checker,
     /// Max request body bytes accepted by ingest. Must fit the agent's
     /// maximum spool file (10 MB) plus envelope — a smaller cap would make
     /// the drain POST 400 and the agent would drop the whole file as
@@ -23,9 +25,11 @@ pub struct AppState {
 impl AppState {
     pub async fn new(pool: sqlx::SqlitePool, cfg: ServerConfig) -> Self {
         db::init_schema(&pool).await.expect("schema init failed");
+        let checker = Checker::new(pool.clone());
         AppState {
             pool,
             cfg,
+            checker,
             max_body_bytes: crate::ingest::MAX_BODY_BYTES,
         }
     }

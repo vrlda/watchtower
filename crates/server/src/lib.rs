@@ -6,3 +6,4 @@ pub mod db;
 pub mod events;
 pub mod hosts;
 pub mod ingest;
+pub mod probes;
