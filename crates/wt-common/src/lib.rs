@@ -23,6 +23,25 @@ pub enum EventKind {
     NetDevErrors,
     /// Emitted by the server's uptime checker, not the agent.
     HostUnreachable,
+    /// SSH login that succeeded (Info; Warning on a first-seen source IP).
+    SshLogin,
+    /// A failed SSH authentication attempt (Warning; episodes escalate to
+    /// SshBruteForce).
+    SshFailed,
+    /// >= threshold failed SSH logins for one (user, ip) within a window.
+    SshBruteForce,
+    /// A login as root over ssh or su (Warning; Critical on first-seen IP).
+    RootLogin,
+    /// A successful sudo invocation (Info — timeline context).
+    SudoUsed,
+    /// A configured important file changed (Warning).
+    FileChanged,
+    /// A new listening port appeared (Warning).
+    NewListeningPort,
+    /// A connection to a previously unseen remote IP (Warning).
+    NewOutboundConnection,
+    /// Established-connection rate deviated from the rolling baseline (Warning).
+    ConnectionRateSpike,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +93,14 @@ pub struct Config {
     pub mem_warn_pct: f64,
     pub swap_warn_pct: f64,
     pub spool_dir: String,
+    /// Files (absolute paths) watched for modification by the FIM sensor.
+    #[serde(default)]
+    pub watch_paths: Vec<String>,
+    /// Failed logins for one (user, ip) within the window that constitute a
+    /// brute-force episode.
+    pub ssh_brute_threshold: u32,
+    /// Seconds window for brute-force counting.
+    pub ssh_brute_window_secs: u64,
 }
 
 impl Default for Config {
@@ -94,6 +121,9 @@ impl Default for Config {
             mem_warn_pct: 85.0,
             swap_warn_pct: 50.0,
             spool_dir: "/var/lib/watchtower/spool".into(),
+            watch_paths: Vec::new(),
+            ssh_brute_threshold: 5,
+            ssh_brute_window_secs: 300,
         }
     }
 }
@@ -186,5 +216,31 @@ mod tests {
             ..Config::default()
         };
         assert!(!cfg.host_id_valid());
+    }
+
+    #[test]
+    fn security_kinds_serialize() {
+        for (kind, expected) in [
+            (EventKind::SshLogin, "SshLogin"),
+            (EventKind::SshFailed, "SshFailed"),
+            (EventKind::SshBruteForce, "SshBruteForce"),
+            (EventKind::RootLogin, "RootLogin"),
+            (EventKind::SudoUsed, "SudoUsed"),
+            (EventKind::FileChanged, "FileChanged"),
+            (EventKind::NewListeningPort, "NewListeningPort"),
+            (EventKind::NewOutboundConnection, "NewOutboundConnection"),
+            (EventKind::ConnectionRateSpike, "ConnectionRateSpike"),
+        ] {
+            let v: serde_json::Value = serde_json::to_value(kind).unwrap();
+            assert_eq!(v, expected);
+        }
+    }
+
+    #[test]
+    fn config_has_security_fields() {
+        let cfg = Config::default();
+        assert_eq!(cfg.ssh_brute_threshold, 5);
+        assert_eq!(cfg.ssh_brute_window_secs, 300);
+        assert!(cfg.watch_paths.is_empty());
     }
 }
