@@ -8,8 +8,9 @@ use wt_common::Heartbeat;
 
 use crate::app::AppState;
 
-/// POST /v1/heartbeat — upsert host, keep last-seen + version. The watchdog
-/// (missing heartbeat → incident) is M4.
+/// POST /v1/heartbeat — upsert host, keep version, refresh last-seen. Seen-times
+/// are server-side facts (liveness); the agent's clock is not trusted. The
+/// watchdog (missing heartbeat → incident) is M4.
 pub async fn heartbeat(State(state): State<AppState>, Json(hb): Json<Heartbeat>) -> Response {
     match upsert_host(&state.pool, &hb).await {
         Ok(()) => StatusCode::OK.into_response(),
@@ -25,13 +26,16 @@ pub async fn heartbeat(State(state): State<AppState>, Json(hb): Json<Heartbeat>)
 }
 
 pub async fn upsert_host(pool: &sqlx::SqlitePool, hb: &Heartbeat) -> Result<(), sqlx::Error> {
+    // seen-times are server-side facts (liveness); the agent's clock is not
+    // trusted for these — a skewed host would break the M4 watchdog.
+    let seen = crate::ingest::now_ms();
     sqlx::query(
         "INSERT INTO hosts (host_id, first_seen, last_seen, version)
          VALUES (?1, ?2, ?2, ?3)
          ON CONFLICT(host_id) DO UPDATE SET last_seen = ?2, version = ?3",
     )
     .bind(&hb.host_id)
-    .bind(hb.ts)
+    .bind(seen)
     .bind(&hb.version)
     .execute(pool)
     .await?;
@@ -125,6 +129,7 @@ mod tests {
                 .unwrap()
             }
         };
+        let before = crate::ingest::now_ms();
         let resp = send(app.clone(), hb_body("h-1", 1000, 0)).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
@@ -150,8 +155,14 @@ mod tests {
         let hosts = json["hosts"].as_array().unwrap();
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0]["host_id"], "h-1");
-        assert_eq!(hosts[0]["last_seen"], 2000);
-        assert_eq!(hosts[0]["first_seen"], 1000);
+        assert!(hosts[0]["first_seen"].as_i64().unwrap() >= before);
+        assert!(
+            hosts[0]["last_seen"].as_i64().unwrap() >= hosts[0]["first_seen"].as_i64().unwrap()
+        );
+        assert!(
+            hosts[0]["last_seen"].as_i64().unwrap() - hosts[0]["first_seen"].as_i64().unwrap()
+                < 5000
+        );
         assert_eq!(hosts[0]["queue_len"], 0);
     }
 
