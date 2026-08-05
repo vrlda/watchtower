@@ -10,11 +10,16 @@ use crate::api::TelemetryPayload;
 use crate::app::build_app;
 use crate::app::AppState;
 
+/// Must fit the agent's maximum spool file (10 MB) plus envelope — a
+/// smaller cap would make the drain POST 400 and the agent would drop
+/// the whole file as "permanent".
+pub(crate) const MAX_BODY_BYTES: usize = 12 * 1024 * 1024;
+
 /// POST /v1/telemetry — idempotent per event id (INSERT OR IGNORE), so agent
 /// retries and spool re-drains never double-count.
 pub async fn ingest(State(state): State<AppState>, request: Request) -> Response {
     let (_, body) = request.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, 1 << 20).await else {
+    let Ok(bytes) = axum::body::to_bytes(body, state.max_body_bytes).await else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "body too large" })),
@@ -222,6 +227,39 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(r#"{"batch":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_oversized_body() {
+        let app = build_app(AppState::for_tests().await).await;
+        let big = serde_json::json!({
+            "batch": (0..200).map(|i| serde_json::json!({
+                "id": format!("big-{}", i),
+                "ts": 1000,
+                "host_id": "h-1",
+                "key": format!("k-{}", i),
+                "kind": "ServiceFailed",
+                "severity": "Warning",
+                "summary": "x".repeat(100),
+                "evidence": []
+            })).collect::<Vec<_>>()
+        })
+        .to_string();
+        assert!(big.len() > 4096, "test body must exceed the test cap");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/telemetry")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(big))
                     .unwrap(),
             )
             .await

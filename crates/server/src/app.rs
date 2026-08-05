@@ -11,12 +11,21 @@ use crate::ingest;
 pub struct AppState {
     pub pool: sqlx::SqlitePool,
     pub cfg: ServerConfig,
+    /// Max request body bytes accepted by ingest. Must fit the agent's
+    /// maximum spool file (10 MB) plus envelope — a smaller cap would make
+    /// the drain POST 400 and the agent would drop the whole file as
+    /// "permanent".
+    pub max_body_bytes: usize,
 }
 
 impl AppState {
     pub async fn new(pool: sqlx::SqlitePool, cfg: ServerConfig) -> Self {
         db::init_schema(&pool).await.expect("schema init failed");
-        AppState { pool, cfg }
+        AppState {
+            pool,
+            cfg,
+            max_body_bytes: crate::ingest::MAX_BODY_BYTES,
+        }
     }
 
     #[cfg(test)]
@@ -26,14 +35,16 @@ impl AppState {
             .connect("sqlite::memory:")
             .await
             .expect("in-memory db");
-        AppState::new(
+        let mut state = AppState::new(
             pool,
             ServerConfig {
                 auth_token: "test-token".into(),
                 ..Default::default()
             },
         )
-        .await
+        .await;
+        state.max_body_bytes = 4096;
+        state
     }
 }
 
