@@ -1,4 +1,5 @@
 mod cmd;
+mod engine;
 mod procfs;
 mod sensors;
 

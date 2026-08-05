@@ -6,6 +6,7 @@ pub struct ProcFs {
     base: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct MemInfo {
     pub mem_used_pct: f64,
     pub swap_used_pct: f64,
@@ -25,15 +26,6 @@ impl ProcFs {
         fs::read_to_string(self.base.join(rel)).map_err(|e| e.to_string())
     }
 
-    pub fn cpu_total(&self) -> Result<u64, String> {
-        let text = self.read("stat")?;
-        let line = text.lines().next().ok_or("empty stat")?;
-        let mut fields = line.split_whitespace();
-        fields.next(); // "cpu"
-        Ok(fields.filter_map(|f| f.parse::<u64>().ok()).sum())
-    }
-
-    /// Total and idle jiffies from the first line of /proc/stat.
     pub fn cpu_ticks(&self) -> Result<(u64, u64), String> {
         let text = self.read("stat")?;
         let line = text.lines().next().ok_or("empty stat")?;
@@ -106,12 +98,6 @@ mod tests {
 
     fn test_base() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc")
-    }
-
-    #[test]
-    fn reads_cpu_total_parses() {
-        let p = ProcFs::new(test_base());
-        assert!(p.cpu_total().unwrap() > 0);
     }
 
     #[test]

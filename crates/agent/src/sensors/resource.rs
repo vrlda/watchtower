@@ -25,7 +25,7 @@ pub fn cpu_usage_now(p: &ProcFs, prev_total: u64, prev_busy: u64) -> (u64, u64, 
 
 fn event(ts: i64, host: &str, key: String, kind: EventKind, sev: Severity, summary: String, detail: String) -> AgentEvent {
     AgentEvent {
-        id: format!("{}-{}-{:?}", host, ts, kind),
+        id: format!("{}-{}-{}", host, ts, key),
         ts,
         host_id: host.into(),
         key,
