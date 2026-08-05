@@ -128,6 +128,8 @@ fn now_ms() -> i64 {
 
 /// One detection pass: run all sensors against current state, apply dedup,
 /// return events to ship. Called every poll interval and by `check`.
+// arg grouping refactor deferred; 8 args accepted for now
+#[allow(clippy::too_many_arguments)]
 pub fn run_once(
     cfg: &Config,
     deduper: &mut Deduper,
@@ -280,12 +282,12 @@ mod tests {
         );
         assert!(evs.iter().all(|e| e.host_id == "h-1"));
     }
-}
 
-struct FakeSys;
+    struct FakeSys;
 
-impl crate::cmd::CommandRunner for FakeSys {
-    fn run(&self, _args: &[&str]) -> Result<String, String> {
-        Ok("".to_string())
+    impl crate::cmd::CommandRunner for FakeSys {
+        fn run(&self, _args: &[&str]) -> Result<String, String> {
+            Ok("".to_string())
+        }
     }
 }

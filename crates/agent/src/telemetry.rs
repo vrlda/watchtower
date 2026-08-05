@@ -37,8 +37,7 @@ impl Spool {
             .append(true)
             .open(&path)?;
         for ev in events {
-            let line = serde_json::to_string(ev)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let line = serde_json::to_string(ev).map_err(std::io::Error::other)?;
             file.write_all(line.as_bytes())?;
             file.write_all(b"\n")?;
         }

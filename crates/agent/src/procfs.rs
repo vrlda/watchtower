@@ -72,6 +72,8 @@ impl ProcFs {
         field.parse::<f64>().map_err(|e| e.to_string())
     }
 
+    // used by M2 reboot detection
+    #[allow(dead_code)]
     pub fn uptime_secs(&self) -> Result<f64, String> {
         let text = self.read("uptime")?;
         let field = text.split_whitespace().next().ok_or("empty uptime")?;
