@@ -71,16 +71,14 @@ impl EpisodeTracker {
 }
 
 /// Shared checker state across probe tasks.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Checker {
-    pub pool: sqlx::SqlitePool,
     pub trackers: Arc<Mutex<HashMap<String, EpisodeTracker>>>,
 }
 
 impl Checker {
-    pub fn new(pool: sqlx::SqlitePool) -> Self {
+    pub fn new() -> Self {
         Checker {
-            pool,
             trackers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -139,7 +137,9 @@ impl Checker {
 /// Persist server-generated events (HostUnreachable) into the store.
 pub async fn store_probe_events(pool: &sqlx::SqlitePool, events: &[AgentEvent]) {
     for ev in events {
-        let _ = crate::ingest::store_events(pool, std::slice::from_ref(ev)).await;
+        if let Err(e) = crate::ingest::store_events(pool, std::slice::from_ref(ev)).await {
+            eprintln!("probe store failed: {e}");
+        }
     }
 }
 

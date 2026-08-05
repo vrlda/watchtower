@@ -9,6 +9,7 @@ use crate::events;
 use crate::hosts;
 use crate::ingest;
 use crate::probes::Checker;
+use tower_http::services::ServeDir;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,7 +26,7 @@ pub struct AppState {
 impl AppState {
     pub async fn new(pool: sqlx::SqlitePool, cfg: ServerConfig) -> Self {
         db::init_schema(&pool).await.expect("schema init failed");
-        let checker = Checker::new(pool.clone());
+        let checker = Checker::new();
         AppState {
             pool,
             cfg,
@@ -63,6 +64,7 @@ pub async fn build_app(state: AppState) -> Router {
         .route("/v1/hosts", get(hosts::list_hosts))
         .route("/v1/events", get(events::list_events))
         .layer(middleware::from_fn_with_state(auth_token, require_token))
+        .fallback_service(ServeDir::new(crate::ui_dir()))
         .with_state(state)
 }
 
@@ -76,6 +78,22 @@ mod tests {
     use axum::body::Body;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn ui_serves_index_html() {
+        let app = build_app(AppState::for_tests().await).await;
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("Watchtower"));
+    }
 
     #[tokio::test]
     async fn ping_returns_ok() {
