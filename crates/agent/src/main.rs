@@ -1,6 +1,7 @@
 mod cmd;
 mod engine;
 mod hostid;
+mod journald;
 mod procfs;
 mod sensors;
 mod telemetry;

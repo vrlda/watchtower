@@ -287,6 +287,9 @@ mod tests {
     struct FakeSys;
 
     impl crate::cmd::CommandRunner for FakeSys {
+        fn program(&self) -> &'static str {
+            "fake"
+        }
         fn run(&self, _args: &[&str]) -> Result<String, String> {
             Ok("".to_string())
         }

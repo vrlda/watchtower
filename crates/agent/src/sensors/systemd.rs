@@ -137,6 +137,9 @@ mod tests {
     }
 
     impl CommandRunner for FakeRunner {
+        fn program(&self) -> &'static str {
+            "fake"
+        }
         fn run(&self, _args: &[&str]) -> Result<String, String> {
             Ok(self.out.clone())
         }

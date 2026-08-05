@@ -1,0 +1,8 @@
+{"__REALTIME_TIMESTAMP":"1758000000123","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Accepted publickey for deploy from 198.51.100.24 port 51234 ssh2: RSA SHA256:abc"}
+{"__REALTIME_TIMESTAMP":"1758000001000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed password for root from 203.0.113.7 port 40000 ssh2"}
+{"__REALTIME_TIMESTAMP":"1758000002000","SYSLOG_IDENTIFIER":"sudo","_PID":"5678","MESSAGE":"deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/systemctl restart nginx"}
+{"__REALTIME_TIMESTAMP":"1758000003000","SYSLOG_IDENTIFIER":"su","_PID":"9012","MESSAGE":"pam_unix(su:session): session opened for user root by (uid=1000)"}
+{"__REALTIME_TIMESTAMP":"1758000004000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"error: maximum authentication attempts exceeded for root from 203.0.113.7 port 40001 ssh2"}
+{"__REALTIME_TIMESTAMP":"1758000005000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Accepted password for root from 198.51.100.24 port 51235 ssh2"}
+{"__REALTIME_TIMESTAMP":"1758000006000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed password for deploy from 192.0.2.55 port 50000 ssh2"}
+{"__REALTIME_TIMESTAMP":"1758000007000","SYSLOG_IDENTIFIER":"cron","_PID":"4321","MESSAGE":"(root) CMD ( /usr/lib/atop/atop.daily )"}

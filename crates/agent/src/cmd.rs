@@ -4,16 +4,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub trait CommandRunner {
+    #[allow(dead_code)] // wired in engine Task 6
+    fn program(&self) -> &'static str;
     fn run(&self, args: &[&str]) -> Result<String, String>;
 }
 
 pub struct SystemCtl;
 
-const TIMEOUT: Duration = Duration::from_secs(10);
-
 impl CommandRunner for SystemCtl {
+    fn program(&self) -> &'static str {
+        "systemctl"
+    }
     fn run(&self, args: &[&str]) -> Result<String, String> {
-        let out = run_with_timeout(args).map_err(|e| e.to_string())?;
+        let out = run_with_timeout("systemctl", args).map_err(|e| e.to_string())?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(format!(
@@ -26,10 +29,31 @@ impl CommandRunner for SystemCtl {
     }
 }
 
-/// Spawn systemctl with stdout/stderr captured and kill it after TIMEOUT.
+#[allow(dead_code)] // wired in engine Task 6
+pub struct JournalCtl;
+
+impl CommandRunner for JournalCtl {
+    fn program(&self) -> &'static str {
+        "journalctl"
+    }
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let out = run_with_timeout("journalctl", args).map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "journalctl exited {}: {}",
+                out.status,
+                stderr.trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// Spawn `program` with stdout/stderr captured and kill it after TIMEOUT.
 /// Reader threads drain the pipes so a verbose child cannot deadlock us.
-fn run_with_timeout(args: &[&str]) -> Result<Output, String> {
-    let mut child = Command::new("systemctl")
+fn run_with_timeout(program: &str, args: &[&str]) -> Result<Output, String> {
+    let mut child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -59,7 +83,11 @@ fn run_with_timeout(args: &[&str]) -> Result<Output, String> {
             child.wait().ok();
             let err = err_reader.join().unwrap_or_default();
             let stderr = String::from_utf8_lossy(&err);
-            return Err(format!("systemctl timed out after 10s: {}", stderr.trim()));
+            return Err(format!(
+                "{} timed out after 10s: {}",
+                program,
+                stderr.trim()
+            ));
         }
         thread::sleep(Duration::from_millis(50));
     };
@@ -70,3 +98,5 @@ fn run_with_timeout(args: &[&str]) -> Result<Output, String> {
         stderr: err_reader.join().unwrap_or_default(),
     })
 }
+
+const TIMEOUT: Duration = Duration::from_secs(10);
