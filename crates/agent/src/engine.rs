@@ -95,11 +95,14 @@ impl CpuState {
 
     /// Feed a fresh cpu usage percentage; emits a CpuSpike event when the
     /// current value deviates from the rolling median by the configured ratio.
-    pub fn observe(&mut self, pct: f64) -> Vec<AgentEvent> {
+    /// The poll `ts` (from run_once) is the single time source for the batch —
+    /// all events in a batch share it. Note: id uniqueness relies on the
+    /// Deduper suppressing a second CpuSpike for "cpu:usage" within its window,
+    /// since two emits at the same ts would otherwise collide on `{host}-cpu-{ts}`.
+    pub fn observe(&mut self, pct: f64, ts: i64) -> Vec<AgentEvent> {
         let mut evs = Vec::new();
         self.detector.push(pct);
         if self.detector.is_spike(pct) {
-            let ts = now_ms();
             evs.push(AgentEvent {
                 id: format!("{}-cpu-{}", self.host, ts),
                 ts,
@@ -117,13 +120,6 @@ impl CpuState {
         }
         evs
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// One detection pass: run all sensors against current state, apply dedup,
@@ -167,7 +163,7 @@ pub fn run_once(
     let (total, busy, pct) = crate::sensors::resource::cpu_usage_now(procfs, cpu.total, cpu.busy);
     cpu.total = total;
     cpu.busy = busy;
-    evs.extend(cpu.observe(pct));
+    evs.extend(cpu.observe(pct, ts));
 
     if let Ok(states) = crate::sensors::systemd::systemctl_list_units(sys) {
         for (unit, state) in states {
@@ -234,11 +230,16 @@ mod tests {
         let mut s = CpuState::new(8, 2.0, "h-1");
         let mut evs = Vec::new();
         for _ in 0..8 {
-            evs.extend(s.observe(5.0));
+            evs.extend(s.observe(5.0, 1000));
         }
         assert!(evs.is_empty());
-        let out = s.observe(90.0);
+        let out = s.observe(90.0, 1000);
         assert_eq!(out[0].kind, EventKind::CpuSpike);
+        assert_eq!(
+            out[0].ts, 1000,
+            "event must use the poll ts, not wall clock"
+        );
+        assert_eq!(out[0].id, "h-1-cpu-1000");
     }
 
     #[test]
@@ -248,7 +249,7 @@ mod tests {
         let mut evs = Vec::new();
         for _ in 0..40 {
             v += 0.5;
-            evs.extend(s.observe(v));
+            evs.extend(s.observe(v, 1000));
         }
         assert!(evs.is_empty());
     }

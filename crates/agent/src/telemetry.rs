@@ -4,10 +4,15 @@ use std::path::PathBuf;
 
 use wt_common::{AgentEvent, Heartbeat};
 
+/// Spool refuses to grow beyond this (10 MB) — drops new batches with a
+/// loud log rather than filling the disk. MVP trade-off, documented.
+pub const MAX_SPOOL_BYTES: u64 = 10 * 1024 * 1024;
+
 /// JSONL spool: one event per line, appended on failure. Reads are
 /// non-destructive; files are acked (deleted) only after delivery.
 pub struct Spool {
     dir: PathBuf,
+    max_bytes: u64,
 }
 
 /// One spool file's contents, read non-destructively.
@@ -27,36 +32,71 @@ pub struct DrainStats {
 impl Spool {
     pub fn new(dir: PathBuf) -> Self {
         fs::create_dir_all(&dir).ok();
-        Spool { dir }
+        Spool {
+            dir,
+            max_bytes: MAX_SPOOL_BYTES,
+        }
+    }
+
+    /// Spool with a custom size cap — tests use a tiny cap instead of
+    /// writing 10 MB to hit the limit.
+    #[cfg(test)]
+    pub fn with_cap(dir: PathBuf, max_bytes: u64) -> Self {
+        fs::create_dir_all(&dir).ok();
+        Spool { dir, max_bytes }
     }
 
     pub fn append(&self, events: &[AgentEvent]) -> std::io::Result<()> {
+        let mut payload = Vec::new();
+        for ev in events {
+            let line = serde_json::to_string(ev).map_err(std::io::Error::other)?;
+            payload.extend_from_slice(line.as_bytes());
+            payload.push(b'\n');
+        }
+        let current: u64 = fs::read_dir(&self.dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter_map(|e| e.metadata().ok())
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0);
+        if current + payload.len() as u64 > self.max_bytes {
+            return Err(std::io::Error::other(format!(
+                "spool at max_bytes cap ({} bytes); dropping {} bytes",
+                self.max_bytes,
+                payload.len()
+            )));
+        }
         let path = self.dir.join(format!("spool-{}.jsonl", std::process::id()));
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
-        for ev in events {
-            let line = serde_json::to_string(ev).map_err(std::io::Error::other)?;
-            file.write_all(line.as_bytes())?;
-            file.write_all(b"\n")?;
-        }
-        Ok(())
+        file.write_all(&payload)
     }
 
     /// Read all spool files oldest-first WITHOUT deleting them. Unreadable
     /// files are skipped (fail-open); individual corrupt lines are skipped.
+    /// Ordering is by file mtime then name — filename-only sorting would
+    /// mis-order `spool-999` vs `spool-1000` across restarts.
     pub fn read_all(&self) -> Vec<SpoolFile> {
         let mut out = Vec::new();
         let mut entries: Vec<_> = match fs::read_dir(&self.dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let modified = e.metadata().ok().and_then(|m| m.modified().ok());
+                    (modified, e)
+                })
+                .collect(),
             Err(e) => {
                 eprintln!("spool read_dir failed: {e}");
                 Vec::new()
             }
         };
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
+        entries.sort_by_key(|(modified, e)| (*modified, e.file_name()));
+        for (_, entry) in entries {
             let text = match fs::read_to_string(entry.path()) {
                 Ok(t) => t,
                 Err(e) => {
@@ -344,6 +384,62 @@ mod tests {
         let files = spool.read_all();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].events[0].ts, 7);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_refuses_above_cap() {
+        let dir = std::env::temp_dir().join(format!("wt-spool-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ev = sample_event(1);
+        let ev_bytes = serde_json::to_string(&ev).unwrap().len() as u64 + 1;
+        let cap = 3 * ev_bytes;
+        let spool = Spool::with_cap(dir.clone(), cap);
+        assert!(
+            spool.append(&[ev.clone()]).is_ok(),
+            "first batch under cap must append"
+        );
+        assert_eq!(spool.count(), 1, "under-cap append must persist");
+        for _ in 0..10 {
+            if spool.append(&[ev.clone()]).is_err() {
+                break;
+            }
+        }
+        let err = spool
+            .append(&[ev.clone()])
+            .expect_err("append above cap must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_bytes cap"),
+            "error must mention the cap, got: {msg}"
+        );
+        let spooled_bytes: u64 = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        assert!(
+            spooled_bytes <= cap + ev_bytes,
+            "spool must stay near the cap, got {spooled_bytes} bytes"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_all_orders_by_mtime_not_filename() {
+        let dir = std::env::temp_dir().join(format!("wt-spool-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = Spool::new(dir.clone());
+        std::fs::write(dir.join("spool-1000.jsonl"), "{\"old\":true}\n").unwrap();
+        std::fs::write(dir.join("spool-999.jsonl"), "{\"new\":true}\n").unwrap();
+        let files = spool.read_all();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files[0].path.file_name().unwrap().to_string_lossy(),
+            "spool-1000.jsonl",
+            "older mtime sorts first despite lexically-smaller name"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

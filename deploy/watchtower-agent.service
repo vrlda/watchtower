@@ -9,6 +9,7 @@ Restart=always
 RestartSec=5
 NoNewPrivileges=no
 ProtectSystem=strict
+ReadWritePaths=/var/lib/watchtower/spool
 
 [Install]
 WantedBy=multi-user.target
