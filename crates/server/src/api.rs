@@ -12,20 +12,7 @@ pub const API_PREFIX: &str = "/v1";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wt_common::{AgentEvent, EventKind, Heartbeat, Severity};
-
-    fn sample_event(id: &str) -> AgentEvent {
-        AgentEvent {
-            id: id.into(),
-            ts: 1000,
-            host_id: "h-1".into(),
-            key: "svc:nginx".into(),
-            kind: EventKind::ServiceFailed,
-            severity: Severity::Critical,
-            summary: "nginx failed".into(),
-            evidence: vec![],
-        }
-    }
+    use wt_common::{EventKind, Heartbeat};
 
     #[test]
     fn telemetry_batch_payload_deserializes() {
