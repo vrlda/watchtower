@@ -1,4 +1,5 @@
 mod procfs;
+mod sensors;
 
 use clap::{Parser, Subcommand};
 

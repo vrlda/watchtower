@@ -33,6 +33,18 @@ impl ProcFs {
         Ok(fields.filter_map(|f| f.parse::<u64>().ok()).sum())
     }
 
+    /// Total and idle jiffies from the first line of /proc/stat.
+    pub fn cpu_ticks(&self) -> Result<(u64, u64), String> {
+        let text = self.read("stat")?;
+        let line = text.lines().next().ok_or("empty stat")?;
+        let mut fields = line.split_whitespace();
+        fields.next(); // "cpu"
+        let nums: Vec<u64> = fields.filter_map(|f| f.parse::<u64>().ok()).collect();
+        let total: u64 = nums.iter().sum();
+        let idle = nums.get(3).copied().unwrap_or(0);
+        Ok((total, idle))
+    }
+
     pub fn meminfo(&self) -> Result<MemInfo, String> {
         let text = self.read("meminfo")?;
         let mut kv = HashMap::new();
@@ -127,6 +139,7 @@ mod tests {
         let p = ProcFs::new(test_base());
         let errs = p.netdev_errors().unwrap();
         assert_eq!(errs[&"eth0".to_string()].tx, 3);
+        assert_eq!(errs[&"eth1".to_string()].rx, 7);
         assert_eq!(errs[&"lo".to_string()].tx, 0);
     }
 }
