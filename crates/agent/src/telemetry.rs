@@ -16,6 +16,14 @@ pub struct SpoolFile {
     pub events: Vec<AgentEvent>,
 }
 
+/// Result of a drain pass.
+#[derive(Debug, Default)]
+pub struct DrainStats {
+    pub delivered: usize,
+    pub dropped: usize,
+    pub deferred: usize,
+}
+
 impl Spool {
     pub fn new(dir: PathBuf) -> Self {
         fs::create_dir_all(&dir).ok();
@@ -24,7 +32,10 @@ impl Spool {
 
     pub fn append(&self, events: &[AgentEvent]) -> std::io::Result<()> {
         let path = self.dir.join(format!("spool-{}.jsonl", std::process::id()));
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         for ev in events {
             let line = serde_json::to_string(ev)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -60,7 +71,10 @@ impl Spool {
                     events.push(ev);
                 }
             }
-            out.push(SpoolFile { path: entry.path(), events });
+            out.push(SpoolFile {
+                path: entry.path(),
+                events,
+            });
         }
         out
     }
@@ -73,6 +87,42 @@ impl Spool {
     /// Number of spooled events (non-destructive).
     pub fn count(&self) -> usize {
         self.read_all().iter().map(|f| f.events.len()).sum()
+    }
+
+    /// Post all spooled files oldest-first. Ack what delivered; drop only
+    /// permanent 4xx failures (except 408/429 which are retryable); keep
+    /// transport/5xx failures spooled and stop the drain.
+    pub fn drain(&self, url: &str, token: &str) -> DrainStats {
+        let mut stats = DrainStats::default();
+        for file in self.read_all() {
+            match post_batch(url, token, &file.events) {
+                Ok(()) => {
+                    self.ack(&file.path);
+                    stats.delivered += file.events.len();
+                }
+                Err(PostError::HttpStatus(code))
+                    if (400..500).contains(&code) && code != 408 && code != 429 =>
+                {
+                    eprintln!(
+                        "permanent failure ({}); dropping {} spooled events",
+                        code,
+                        file.events.len()
+                    );
+                    self.ack(&file.path);
+                    stats.dropped += file.events.len();
+                }
+                Err(e) => {
+                    eprintln!(
+                        "drain deferred ({}): {} events stay spooled",
+                        e,
+                        file.events.len()
+                    );
+                    stats.deferred += file.events.len();
+                    break;
+                }
+            }
+        }
+        stats
     }
 }
 
@@ -176,7 +226,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
             let mut req = Vec::new();
             loop {
                 let mut chunk = [0u8; 4096];
@@ -187,7 +239,9 @@ mod tests {
                 }
             }
             let req = String::from_utf8_lossy(&req).into_owned();
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(50));
             req
@@ -205,7 +259,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
             let mut req = Vec::new();
             loop {
                 let mut chunk = [0u8; 4096];
@@ -216,13 +272,20 @@ mod tests {
                 }
             }
             let req = String::from_utf8_lossy(&req).into_owned();
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(50));
             req
         });
         let url = format!("http://{}", addr);
-        let hb = Heartbeat { host_id: "h-1".into(), ts: 9, version: "0.1.0".into(), queue_len: 3 };
+        let hb = Heartbeat {
+            host_id: "h-1".into(),
+            ts: 9,
+            version: "0.1.0".into(),
+            queue_len: 3,
+        };
         post_heartbeat(&url, "secret-token", &hb).unwrap();
         let req = handle.join().unwrap();
         assert!(req.contains("\"queue_len\":3"));
@@ -234,7 +297,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
             let mut req = Vec::new();
             loop {
                 let mut chunk = [0u8; 4096];
@@ -280,6 +345,102 @@ mod tests {
         let files = spool.read_all();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].events[0].ts, 7);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Spawn a mock server answering every request with the given status line.
+    fn mock_server(status: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
+            let mut req = Vec::new();
+            loop {
+                let mut chunk = [0u8; 4096];
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => req.extend_from_slice(&chunk[..n]),
+                    Err(_) => break, // read timeout: client finished sending
+                }
+            }
+            let _ = String::from_utf8_lossy(&req).into_owned();
+            stream
+                .write_all(format!("{status}\r\nContent-Length: 0\r\n\r\n").as_bytes())
+                .unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn drain_spool_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("wt-spool-drain-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn drain_acks_on_success() {
+        let (url, handle) = mock_server("HTTP/1.1 200 OK");
+        let dir = drain_spool_dir("ok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = Spool::new(dir.clone());
+        spool.append(&[sample_event(1)]).unwrap();
+        let stats = spool.drain(&url, "secret-token");
+        handle.join().unwrap();
+        assert_eq!(stats.delivered, 1);
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(stats.deferred, 0);
+        assert!(spool.read_all().is_empty(), "delivered file must be acked");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_keeps_events_on_500() {
+        let (url, handle) = mock_server("HTTP/1.1 500 Internal Server Error");
+        let dir = drain_spool_dir("500");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = Spool::new(dir.clone());
+        spool.append(&[sample_event(1)]).unwrap();
+        let stats = spool.drain(&url, "secret-token");
+        handle.join().unwrap();
+        assert_eq!(stats.delivered, 0);
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(stats.deferred, 1);
+        assert_eq!(spool.count(), 1, "5xx must stay spooled");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_drops_on_401() {
+        let (url, handle) = mock_server("HTTP/1.1 401 Unauthorized");
+        let dir = drain_spool_dir("401");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = Spool::new(dir.clone());
+        spool.append(&[sample_event(1)]).unwrap();
+        let stats = spool.drain(&url, "secret-token");
+        handle.join().unwrap();
+        assert_eq!(stats.delivered, 0);
+        assert_eq!(stats.dropped, 1);
+        assert_eq!(stats.deferred, 0);
+        assert!(spool.read_all().is_empty(), "permanent 4xx must be acked");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_defers_on_429_rate_limit() {
+        let (url, handle) = mock_server("HTTP/1.1 429 Too Many Requests");
+        let dir = drain_spool_dir("429");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = Spool::new(dir.clone());
+        spool.append(&[sample_event(1)]).unwrap();
+        let stats = spool.drain(&url, "secret-token");
+        handle.join().unwrap();
+        assert_eq!(stats.delivered, 0);
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(stats.deferred, 1);
+        assert_eq!(spool.count(), 1, "429 must stay spooled, not dropped");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

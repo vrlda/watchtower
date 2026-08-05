@@ -12,9 +12,15 @@ pub enum ServiceState {
 
 /// Parse `systemctl list-units --type=service --all --no-legend --plain` output
 /// into unit -> state. Non-.service lines are ignored.
-pub fn systemctl_list_units(runner: &dyn CommandRunner) -> Result<HashMap<String, ServiceState>, String> {
+pub fn systemctl_list_units(
+    runner: &dyn CommandRunner,
+) -> Result<HashMap<String, ServiceState>, String> {
     let out = runner.run(&[
-        "list-units", "--type=service", "--all", "--no-legend", "--plain",
+        "list-units",
+        "--type=service",
+        "--all",
+        "--no-legend",
+        "--plain",
     ])?;
     let mut map = HashMap::new();
     for line in out.lines() {
@@ -45,7 +51,11 @@ pub struct CrashTracker {
 
 impl CrashTracker {
     pub fn new(window_secs: u64) -> Self {
-        CrashTracker { window_secs, restarts: HashMap::new(), last_state: HashMap::new() }
+        CrashTracker {
+            window_secs,
+            restarts: HashMap::new(),
+            last_state: HashMap::new(),
+        }
     }
 
     /// Observe one unit state at `ts` (unix seconds). Emits:
@@ -53,13 +63,21 @@ impl CrashTracker {
     ///   ever observation being Failed (no restart counted for the first sighting)
     /// - ServiceCrashLoop (Critical) when >=3 restart transitions happen
     ///   within the window
-    pub fn observe(&mut self, unit: &str, state: ServiceState, ts: u64, host: &str, evs: &mut Vec<AgentEvent>) {
+    pub fn observe(
+        &mut self,
+        unit: &str,
+        state: ServiceState,
+        ts: u64,
+        host: &str,
+        evs: &mut Vec<AgentEvent>,
+    ) {
         let prev = *self.last_state.entry(unit.to_string()).or_insert(None);
         self.last_state.insert(unit.to_string(), Some(state));
 
         if state == ServiceState::Failed {
             let first_sighting = prev.is_none();
-            let fresh_failure = prev == Some(ServiceState::Active) || prev == Some(ServiceState::Other);
+            let fresh_failure =
+                prev == Some(ServiceState::Active) || prev == Some(ServiceState::Other);
             if first_sighting || fresh_failure {
                 let list = self.restarts.entry(unit.to_string()).or_default();
                 if !first_sighting {
@@ -72,11 +90,27 @@ impl CrashTracker {
                     ts: ts as i64 * 1000,
                     host_id: host.into(),
                     key: format!("svc:{}", unit),
-                    kind: if is_loop { EventKind::ServiceCrashLoop } else { EventKind::ServiceFailed },
-                    severity: if is_loop { Severity::Critical } else { Severity::Warning },
-                    summary: format!("{} {} ({} restarts in {}s)", unit,
-                        if is_loop { "crash-looping" } else { "entered failed state" },
-                        list.len(), self.window_secs),
+                    kind: if is_loop {
+                        EventKind::ServiceCrashLoop
+                    } else {
+                        EventKind::ServiceFailed
+                    },
+                    severity: if is_loop {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    },
+                    summary: format!(
+                        "{} {} ({} restarts in {}s)",
+                        unit,
+                        if is_loop {
+                            "crash-looping"
+                        } else {
+                            "entered failed state"
+                        },
+                        list.len(),
+                        self.window_secs
+                    ),
                     evidence: vec![wt_common::Evidence {
                         ts: ts as i64 * 1000,
                         source: "systemd".into(),
@@ -93,7 +127,9 @@ mod tests {
     use super::*;
 
     fn fake_runner(out: &'static str) -> FakeRunner {
-        FakeRunner { out: out.to_string() }
+        FakeRunner {
+            out: out.to_string(),
+        }
     }
 
     struct FakeRunner {
@@ -139,9 +175,18 @@ cron.service        loaded active running cron
         let mut evs = Vec::new();
         for ts in [1000, 1010, 1020, 1030, 1040, 1050] {
             m.observe("flaky.service", ServiceState::Active, ts, "h-1", &mut evs);
-            m.observe("flaky.service", ServiceState::Failed, ts + 5, "h-1", &mut evs);
+            m.observe(
+                "flaky.service",
+                ServiceState::Failed,
+                ts + 5,
+                "h-1",
+                &mut evs,
+            );
         }
-        let crash = evs.iter().filter(|e| e.kind == EventKind::ServiceCrashLoop).count();
+        let crash = evs
+            .iter()
+            .filter(|e| e.kind == EventKind::ServiceCrashLoop)
+            .count();
         assert!(crash >= 1, "expected crash-loop event, got {evs:?}");
     }
 

@@ -16,7 +16,11 @@ impl CommandRunner for SystemCtl {
         let out = run_with_timeout(args).map_err(|e| e.to_string())?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("systemctl exited {}: {}", out.status, stderr.trim()));
+            return Err(format!(
+                "systemctl exited {}: {}",
+                out.status,
+                stderr.trim()
+            ));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }

@@ -35,7 +35,10 @@ fn load_config(path: &PathBuf) -> Config {
             eprintln!("invalid config {}: {}; using defaults", path.display(), e);
             Config::default()
         }),
-        Err(_) => Config::default(),
+        Err(e) => {
+            eprintln!("no config at {} ({}); using defaults", path.display(), e);
+            Config::default()
+        }
     }
 }
 
@@ -72,6 +75,10 @@ fn main() {
                 println!("{}", serde_json::to_string(ev).unwrap());
             }
             if evs.is_empty() {
+                if procfs_is_broken(&procfs) {
+                    eprintln!("all sensors failed — cannot confirm host health");
+                    std::process::exit(1);
+                }
                 println!("no issues detected");
             }
         }
@@ -105,7 +112,13 @@ fn main() {
                 if last_heartbeat.elapsed() >= Duration::from_secs(cfg.heartbeat_secs)
                     && !cfg.server_url.is_empty()
                 {
-                    drain_spool(&cfg, &spool);
+                    let stats = spool.drain(&cfg.server_url, &cfg.token);
+                    if stats.delivered > 0 || stats.dropped > 0 {
+                        eprintln!(
+                            "drain: {} delivered, {} dropped, {} deferred",
+                            stats.delivered, stats.dropped, stats.deferred
+                        );
+                    }
                     let hb = Heartbeat {
                         host_id: host_id.clone(),
                         ts: now_ms(),
@@ -123,24 +136,10 @@ fn main() {
     }
 }
 
-/// Replay spooled events, posting oldest-first. Ack (delete) only what was
-/// delivered; permanent 4xx failures are acked too (a bad token or payload
-/// will never deliver — avoid unbounded spool growth). Retryable failures
-/// (transport, 5xx) stay spooled for the next drain.
-fn drain_spool(cfg: &Config, spool: &telemetry::Spool) {
-    for file in spool.read_all() {
-        match telemetry::post_batch(&cfg.server_url, &cfg.token, &file.events) {
-            Ok(()) => spool.ack(&file.path),
-            Err(telemetry::PostError::HttpStatus(code)) if (400..500).contains(&code) => {
-                eprintln!("permanent failure ({}); dropping {} spooled events", code, file.events.len());
-                spool.ack(&file.path);
-            }
-            Err(e) => {
-                eprintln!("drain failed ({:?}); {} events stay spooled", e, file.events.len());
-                break;
-            }
-        }
-    }
+/// True when the core /proc sensors all failed — used by `check` to avoid
+/// claiming "no issues" on a host we cannot read.
+fn procfs_is_broken(procfs: &procfs::ProcFs) -> bool {
+    procfs.meminfo().is_err() && procfs.load_one_min().is_err() && procfs.netdev_errors().is_err()
 }
 
 fn now_ms() -> i64 {

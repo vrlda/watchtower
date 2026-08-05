@@ -12,7 +12,11 @@ pub struct SpikeDetector {
 
 impl SpikeDetector {
     pub fn new(window: usize, ratio: f64) -> Self {
-        SpikeDetector { samples: VecDeque::with_capacity(window), window, ratio }
+        SpikeDetector {
+            samples: VecDeque::with_capacity(window),
+            window,
+            ratio,
+        }
     }
 
     pub fn push(&mut self, v: f64) {
@@ -51,11 +55,17 @@ pub struct Deduper {
 
 impl Deduper {
     pub fn new(window_secs: i64) -> Self {
-        Deduper { window_secs, last_emitted: HashMap::new() }
+        Deduper {
+            window_secs,
+            last_emitted: HashMap::new(),
+        }
     }
 
     pub fn should_emit(&mut self, kind: EventKind, key: &str, ts: i64) -> bool {
-        let entry = self.last_emitted.entry((kind, key.to_string())).or_insert(i64::MIN);
+        let entry = self
+            .last_emitted
+            .entry((kind, key.to_string()))
+            .or_insert(i64::MIN);
         if ts.saturating_sub(*entry) >= self.window_secs {
             *entry = ts;
             true
@@ -75,7 +85,12 @@ pub struct CpuState {
 
 impl CpuState {
     pub fn new(window: usize, ratio: f64, host: &str) -> Self {
-        CpuState { host: host.into(), total: 0, busy: 0, detector: SpikeDetector::new(window, ratio) }
+        CpuState {
+            host: host.into(),
+            total: 0,
+            busy: 0,
+            detector: SpikeDetector::new(window, ratio),
+        }
     }
 
     /// Feed a fresh cpu usage percentage; emits a CpuSpike event when the
@@ -93,7 +108,11 @@ impl CpuState {
                 kind: EventKind::CpuSpike,
                 severity: Severity::Warning,
                 summary: format!("CPU usage spiked to {:.0}%", pct),
-                evidence: vec![Evidence { ts, source: "engine".into(), detail: format!("CpuUsagePct={:.1}", pct) }],
+                evidence: vec![Evidence {
+                    ts,
+                    source: "engine".into(),
+                    detail: format!("CpuUsagePct={:.1}", pct),
+                }],
             });
         }
         evs
@@ -128,8 +147,12 @@ pub fn run_once(
         eprintln!("sensor procfs.meminfo failed");
     }
     if let Ok(load) = procfs.load_one_min() {
-        let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        evs.extend(crate::sensors::resource::load_events(load, ncpu, cfg, host_id, ts));
+        let ncpu = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        evs.extend(crate::sensors::resource::load_events(
+            load, ncpu, cfg, host_id, ts,
+        ));
     } else {
         eprintln!("sensor procfs.load_one_min failed");
     }
@@ -234,11 +257,27 @@ mod tests {
         let mut deduper = Deduper::new(300);
         let mut cpu = CpuState::new(20, 2.5, "h-1");
         let mut crash = crate::sensors::systemd::CrashTracker::new(120);
-        let p = crate::procfs::ProcFs::new(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"));
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
         let runner = FakeSys;
-        let evs = run_once(&cfg, &mut deduper, "h-1", 1000, &p, &runner, &mut crash, &mut cpu);
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1000,
+            &p,
+            &runner,
+            &mut crash,
+            &mut cpu,
+        );
         assert!(evs.iter().any(|e| e.kind == EventKind::SwapHigh));
-        assert_eq!(evs.iter().filter(|e| e.kind == EventKind::NetDevErrors).count(), 2);
+        assert_eq!(
+            evs.iter()
+                .filter(|e| e.kind == EventKind::NetDevErrors)
+                .count(),
+            2
+        );
         assert!(evs.iter().all(|e| e.host_id == "h-1"));
     }
 }

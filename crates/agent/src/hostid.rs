@@ -11,15 +11,12 @@ pub fn resolve_from_path(path: &Path) -> Option<String> {
 }
 
 /// Machine id from /etc/machine-id, then /var/lib/dbus/machine-id,
-/// then hostname as last resort.
+/// then hostname as last resort. Blank/whitespace files fall through
+/// to the next source via resolve_from_path's empty-rejecting trim.
 pub fn resolve() -> String {
     resolve_from_path(&PathBuf::from("/etc/machine-id"))
         .or_else(|| resolve_from_path(&PathBuf::from("/var/lib/dbus/machine-id")))
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-        })
+        .or_else(|| resolve_from_path(&PathBuf::from("/etc/hostname")))
         .unwrap_or_else(|| "unknown-host".into())
 }
 
@@ -45,6 +42,14 @@ mod tests {
     fn blank_machine_id_returns_none() {
         let p = std::env::temp_dir().join(format!("machine-id-blank-{}", std::process::id()));
         std::fs::write(&p, "   \n").unwrap();
+        assert_eq!(resolve_from_path(&p), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn whitespace_only_hostname_returns_none() {
+        let p = std::env::temp_dir().join(format!("hostname-blank-{}", std::process::id()));
+        std::fs::write(&p, "  \t \n").unwrap();
         assert_eq!(resolve_from_path(&p), None);
         std::fs::remove_file(&p).ok();
     }

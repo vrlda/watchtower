@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::procfs::{MemInfo, NetDevErrors, ProcFs};
-use wt_common::{AgentEvent, Config, Evidence, EventKind, Severity};
+use wt_common::{AgentEvent, Config, EventKind, Evidence, Severity};
 
 /// Percentage of CPU time spent busy, given deltas between two samples.
 pub fn cpu_usage_pct(busy_delta: u64, total_delta: u64) -> f64 {
@@ -25,11 +25,22 @@ pub fn cpu_usage_now(p: &ProcFs, prev_total: u64, prev_busy: u64) -> (u64, u64, 
     if prev_total == 0 {
         return (total, busy, 0.0);
     }
-    let (d_total, d_busy) = (total.saturating_sub(prev_total), busy.saturating_sub(prev_busy));
+    let (d_total, d_busy) = (
+        total.saturating_sub(prev_total),
+        busy.saturating_sub(prev_busy),
+    );
     (total, busy, cpu_usage_pct(d_busy, d_total))
 }
 
-fn event(ts: i64, host: &str, key: String, kind: EventKind, sev: Severity, summary: String, detail: String) -> AgentEvent {
+fn event(
+    ts: i64,
+    host: &str,
+    key: String,
+    kind: EventKind,
+    sev: Severity,
+    summary: String,
+    detail: String,
+) -> AgentEvent {
     AgentEvent {
         id: format!("{}-{}-{}", host, ts, key),
         ts,
@@ -38,7 +49,11 @@ fn event(ts: i64, host: &str, key: String, kind: EventKind, sev: Severity, summa
         kind,
         severity: sev,
         summary,
-        evidence: vec![Evidence { ts, source: "procfs".into(), detail }],
+        evidence: vec![Evidence {
+            ts,
+            source: "procfs".into(),
+            detail,
+        }],
     }
 }
 
@@ -46,7 +61,11 @@ pub fn mem_events(m: MemInfo, cfg: &Config, host: &str, ts: i64) -> Vec<AgentEve
     let mut out = Vec::new();
     if m.mem_used_pct >= cfg.mem_warn_pct {
         out.push(event(
-            ts, host, "mem:used".into(), EventKind::MemHigh, Severity::Warning,
+            ts,
+            host,
+            "mem:used".into(),
+            EventKind::MemHigh,
+            Severity::Warning,
             format!("Memory usage at {:.0}%", m.mem_used_pct),
             format!("MemUsedPct={:.1}", m.mem_used_pct),
         ));
@@ -58,7 +77,11 @@ pub fn swap_events(m: MemInfo, cfg: &Config, host: &str, ts: i64) -> Vec<AgentEv
     let mut out = Vec::new();
     if m.swap_used_pct >= cfg.swap_warn_pct {
         out.push(event(
-            ts, host, "mem:swap".into(), EventKind::SwapHigh, Severity::Warning,
+            ts,
+            host,
+            "mem:swap".into(),
+            EventKind::SwapHigh,
+            Severity::Warning,
             format!("Swap usage at {:.0}%", m.swap_used_pct),
             format!("SwapUsedPct={:.1}", m.swap_used_pct),
         ));
@@ -72,13 +95,21 @@ pub fn load_events(load: f64, ncpu: usize, cfg: &Config, host: &str, ts: i64) ->
     let ratio = load / ncpu;
     if ratio >= cfg.load_crit_ratio {
         out.push(event(
-            ts, host, "load:1m".into(), EventKind::LoadHigh, Severity::Critical,
+            ts,
+            host,
+            "load:1m".into(),
+            EventKind::LoadHigh,
+            Severity::Critical,
             format!("Load {} is {:.1}x the {} cores", load, ratio, ncpu),
             format!("LoadOneMin={:.2} Ncpu={:.0}", load, ncpu),
         ));
     } else if ratio >= cfg.load_warn_ratio {
         out.push(event(
-            ts, host, "load:1m".into(), EventKind::LoadHigh, Severity::Warning,
+            ts,
+            host,
+            "load:1m".into(),
+            EventKind::LoadHigh,
+            Severity::Warning,
             format!("Load {} is {:.1}x the {} cores", load, ratio, ncpu),
             format!("LoadOneMin={:.2} Ncpu={:.0}", load, ncpu),
         ));
@@ -91,8 +122,15 @@ pub fn netdev_events(errs: &HashMap<String, NetDevErrors>, host: &str, ts: i64) 
     for (iface, e) in errs {
         if e.rx > 0 || e.tx > 0 {
             out.push(event(
-                ts, host, format!("netdev:{}", iface), EventKind::NetDevErrors, Severity::Warning,
-                format!("{} reports interface errors (rx {}, tx {})", iface, e.rx, e.tx),
+                ts,
+                host,
+                format!("netdev:{}", iface),
+                EventKind::NetDevErrors,
+                Severity::Warning,
+                format!(
+                    "{} reports interface errors (rx {}, tx {})",
+                    iface, e.rx, e.tx
+                ),
                 format!("RxErrors={} TxErrors={}", e.rx, e.tx),
             ));
         }
@@ -126,20 +164,44 @@ mod tests {
 
     #[test]
     fn memory_over_threshold_emits_warning() {
-        let evs = mem_events(MemInfo { mem_used_pct: 85.0, swap_used_pct: 0.0 }, &cfg(), "h-1", 1);
+        let evs = mem_events(
+            MemInfo {
+                mem_used_pct: 85.0,
+                swap_used_pct: 0.0,
+            },
+            &cfg(),
+            "h-1",
+            1,
+        );
         assert_eq!(evs[0].kind, EventKind::MemHigh);
         assert_eq!(evs[0].severity, Severity::Warning);
     }
 
     #[test]
     fn memory_under_threshold_emits_nothing() {
-        let evs = mem_events(MemInfo { mem_used_pct: 30.0, swap_used_pct: 0.0 }, &cfg(), "h-1", 1);
+        let evs = mem_events(
+            MemInfo {
+                mem_used_pct: 30.0,
+                swap_used_pct: 0.0,
+            },
+            &cfg(),
+            "h-1",
+            1,
+        );
         assert!(evs.is_empty());
     }
 
     #[test]
     fn swap_over_threshold_emits_warning() {
-        let evs = swap_events(MemInfo { mem_used_pct: 0.0, swap_used_pct: 60.0 }, &cfg(), "h-1", 1);
+        let evs = swap_events(
+            MemInfo {
+                mem_used_pct: 0.0,
+                swap_used_pct: 60.0,
+            },
+            &cfg(),
+            "h-1",
+            1,
+        );
         assert_eq!(evs[0].kind, EventKind::SwapHigh);
     }
 

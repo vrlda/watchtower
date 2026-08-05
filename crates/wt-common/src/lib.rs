@@ -116,7 +116,11 @@ mod tests {
             kind: EventKind::ServiceFailed,
             severity: Severity::Critical,
             summary: "nginx.service entered failed state".into(),
-            evidence: vec![Evidence { ts: 999, source: "systemd".into(), detail: "ActiveState=failed".into() }],
+            evidence: vec![Evidence {
+                ts: 999,
+                source: "systemd".into(),
+                detail: "ActiveState=failed".into(),
+            }],
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["kind"], "ServiceFailed");
@@ -132,7 +136,12 @@ mod tests {
 
     #[test]
     fn heartbeat_serializes() {
-        let hb = Heartbeat { host_id: "h-1".into(), ts: 5, version: "0.1.0".into(), queue_len: 2 };
+        let hb = Heartbeat {
+            host_id: "h-1".into(),
+            ts: 5,
+            version: "0.1.0".into(),
+            queue_len: 2,
+        };
         let v: serde_json::Value = serde_json::to_value(&hb).unwrap();
         assert_eq!(v["queue_len"], 2);
     }
@@ -154,11 +163,20 @@ mod tests {
 
     #[test]
     fn host_id_valid_accepts_real_id_rejects_whitespace() {
-        let cfg = Config { host_id: "abc123".into(), ..Config::default() };
+        let cfg = Config {
+            host_id: "abc123".into(),
+            ..Config::default()
+        };
         assert!(cfg.host_id_valid());
-        let cfg = Config { host_id: "  ".into(), ..Config::default() };
+        let cfg = Config {
+            host_id: "  ".into(),
+            ..Config::default()
+        };
         assert!(!cfg.host_id_valid());
-        let cfg = Config { host_id: "Auto".into(), ..Config::default() };
+        let cfg = Config {
+            host_id: "Auto".into(),
+            ..Config::default()
+        };
         assert!(!cfg.host_id_valid());
     }
 }

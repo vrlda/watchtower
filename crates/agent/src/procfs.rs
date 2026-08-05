@@ -53,8 +53,16 @@ impl ProcFs {
         let swap_total = *kv.get("SwapTotal").unwrap_or(&0) as f64;
         let swap_free = *kv.get("SwapFree").unwrap_or(&0) as f64;
         Ok(MemInfo {
-            mem_used_pct: if total > 0.0 { (total - avail) / total * 100.0 } else { 0.0 },
-            swap_used_pct: if swap_total > 0.0 { (swap_total - swap_free) / swap_total * 100.0 } else { 0.0 },
+            mem_used_pct: if total > 0.0 {
+                (total - avail) / total * 100.0
+            } else {
+                0.0
+            },
+            swap_used_pct: if swap_total > 0.0 {
+                (swap_total - swap_free) / swap_total * 100.0
+            } else {
+                0.0
+            },
         })
     }
 
@@ -84,7 +92,13 @@ impl ProcFs {
                 .filter_map(|f| f.parse::<u64>().ok())
                 .collect();
             if vals.len() >= 16 {
-                out.insert(name, NetDevErrors { rx: vals[2], tx: vals[10] });
+                out.insert(
+                    name,
+                    NetDevErrors {
+                        rx: vals[2],
+                        tx: vals[10],
+                    },
+                );
             }
         }
         Ok(out)
