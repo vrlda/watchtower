@@ -7,8 +7,6 @@ pub struct TelemetryPayload {
     pub batch: Vec<AgentEvent>,
 }
 
-pub const API_PREFIX: &str = "/v1";
-
 #[cfg(test)]
 mod tests {
     use super::*;

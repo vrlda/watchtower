@@ -14,6 +14,10 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
     let cfg = watchtower_server::config::load(&cli.config);
+    if cfg.auth_token.is_empty() {
+        eprintln!("server config: auth_token is empty — refusing to run without auth");
+        std::process::exit(1);
+    }
     let pool = match watchtower_server::db::connect(&cfg).await {
         Ok(p) => p,
         Err(e) => {

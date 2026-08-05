@@ -1,0 +1,231 @@
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::json;
+use wt_common::{AgentEvent, EventKind, Severity};
+
+use crate::api::TelemetryPayload;
+#[cfg(test)]
+use crate::app::build_app;
+use crate::app::AppState;
+
+/// POST /v1/telemetry — idempotent per event id (INSERT OR IGNORE), so agent
+/// retries and spool re-drains never double-count.
+pub async fn ingest(State(state): State<AppState>, request: Request) -> Response {
+    let (_, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 1 << 20).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "body too large" })),
+        )
+            .into_response();
+    };
+    let Ok(payload) = serde_json::from_slice::<TelemetryPayload>(&bytes) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid payload" })),
+        )
+            .into_response();
+    };
+    if payload.batch.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "empty batch" })),
+        )
+            .into_response();
+    }
+    match store_events(&state.pool, &payload.batch).await {
+        Ok((accepted, duplicates)) => {
+            Json(json!({ "accepted": accepted, "duplicates": duplicates })).into_response()
+        }
+        Err(e) => {
+            eprintln!("ingest failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "store failed" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn store_events(
+    pool: &sqlx::SqlitePool,
+    batch: &[AgentEvent],
+) -> Result<(u64, u64), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let mut accepted = 0u64;
+    for ev in batch {
+        let evidence = serde_json::to_string(&ev.evidence).unwrap_or_else(|_| "[]".into());
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO events (id, ts, host_id, key, kind, severity, summary, evidence_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&ev.id)
+        .bind(ev.ts)
+        .bind(&ev.host_id)
+        .bind(&ev.key)
+        .bind(kind_wire(ev.kind))
+        .bind(severity_wire(ev.severity))
+        .bind(&ev.summary)
+        .bind(evidence)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?;
+        if res.rows_affected() > 0 {
+            accepted += 1;
+        }
+    }
+    tx.commit().await?;
+    let total = batch.len() as u64;
+    Ok((accepted, total.saturating_sub(accepted)))
+}
+
+/// PascalCase wire strings, identical to the serde JSON representation
+/// (server-generated events go through the same store).
+fn kind_wire(kind: EventKind) -> String {
+    serde_json::to_string(&kind)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string()
+}
+
+fn severity_wire(sev: Severity) -> String {
+    serde_json::to_string(&sev)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string()
+}
+
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn batch_body(n: usize) -> String {
+        let batch: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("e-{}", i),
+                    "ts": 1000 + i,
+                    "host_id": "h-1",
+                    "key": format!("k-{}", i),
+                    "kind": "ServiceFailed",
+                    "severity": "Warning",
+                    "summary": format!("event {}", i),
+                    "evidence": []
+                })
+            })
+            .collect();
+        serde_json::json!({ "batch": batch }).to_string()
+    }
+
+    #[tokio::test]
+    async fn ingest_stores_events_and_returns_counts() {
+        let app = build_app(AppState::for_tests().await).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/telemetry")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(batch_body(2)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["accepted"], 2);
+        assert_eq!(json["duplicates"], 0);
+    }
+
+    #[tokio::test]
+    async fn ingest_deduplicates_by_event_id() {
+        let app = build_app(AppState::for_tests().await).await;
+        let send = |app: axum::Router| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/telemetry")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(batch_body(1)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let first = send(app.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        assert_eq!(first_json["accepted"], 1);
+
+        let second = send(app.clone()).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+        assert_eq!(second_json["accepted"], 0);
+        assert_eq!(second_json["duplicates"], 1);
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_missing_token() {
+        let app = build_app(AppState::for_tests().await).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/telemetry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(batch_body(1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_empty_batch() {
+        let app = build_app(AppState::for_tests().await).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/telemetry")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(r#"{"batch":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}

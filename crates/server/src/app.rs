@@ -1,8 +1,11 @@
-use axum::routing::get;
+use axum::middleware;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use crate::auth::{require_token, AuthToken};
 use crate::config::ServerConfig;
 use crate::db;
+use crate::ingest;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,12 +26,24 @@ impl AppState {
             .connect("sqlite::memory:")
             .await
             .expect("in-memory db");
-        AppState::new(pool, ServerConfig::default()).await
+        AppState::new(
+            pool,
+            ServerConfig {
+                auth_token: "test-token".into(),
+                ..Default::default()
+            },
+        )
+        .await
     }
 }
 
 pub async fn build_app(state: AppState) -> Router {
-    Router::new().route("/v1/ping", get(ping)).with_state(state)
+    let auth_token = AuthToken(state.cfg.auth_token.clone());
+    Router::new()
+        .route("/v1/ping", get(ping))
+        .route("/v1/telemetry", post(ingest::ingest))
+        .layer(middleware::from_fn_with_state(auth_token, require_token))
+        .with_state(state)
 }
 
 async fn ping() -> Json<serde_json::Value> {
@@ -50,6 +65,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/v1/ping")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

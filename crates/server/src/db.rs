@@ -1,8 +1,17 @@
-/// Connect to the configured database.
+use std::str::FromStr;
+
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+
+/// Connect to the configured database with WAL journaling (concurrent
+/// reader + writer without lock contention).
 pub async fn connect(cfg: &crate::config::ServerConfig) -> Result<sqlx::SqlitePool, sqlx::Error> {
-    sqlx::sqlite::SqlitePoolOptions::new()
+    let options = SqliteConnectOptions::from_str(&cfg.db_url)
+        .map_err(|e| sqlx::Error::Configuration(Box::new(e)))?
+        .journal_mode(SqliteJournalMode::Wal)
+        .create_if_missing(true);
+    SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&cfg.db_url)
+        .connect_with(options)
         .await
 }
 
@@ -28,7 +37,7 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
             severity      TEXT NOT NULL,
             summary       TEXT NOT NULL,
             evidence_json TEXT NOT NULL DEFAULT '[]',
-            created_at    INTEGER NOT NULL
+            created_at    INTEGER NOT NULL -- server ingest time; NEVER used for ordering
         )",
     )
     .execute(pool)
