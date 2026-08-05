@@ -1,3 +1,4 @@
+mod cmd;
 mod procfs;
 mod sensors;
 
