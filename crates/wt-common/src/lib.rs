@@ -21,6 +21,8 @@ pub enum EventKind {
     LoadHigh,
     SwapHigh,
     NetDevErrors,
+    /// Emitted by the server's uptime checker, not the agent.
+    HostUnreachable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +128,12 @@ mod tests {
         assert_eq!(v["kind"], "ServiceFailed");
         assert_eq!(v["severity"], "Critical");
         assert_eq!(v["evidence"][0]["source"], "systemd");
+    }
+
+    #[test]
+    fn host_unreachable_kind_serializes() {
+        let v: serde_json::Value = serde_json::to_value(EventKind::HostUnreachable).unwrap();
+        assert_eq!(v, "HostUnreachable");
     }
 
     #[test]
