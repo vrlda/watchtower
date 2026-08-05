@@ -1,0 +1,12 @@
+[package]
+name = "watchtower-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "2", features = ["tls"] }
+libc = "0.2"
+wt-common = { path = "../wt-common" }
