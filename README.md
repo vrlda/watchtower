@@ -62,6 +62,11 @@ The installer: installs the binary, writes /etc/watchtower/agent.toml,
 installs + starts the systemd unit, and prints the discovery checklist.
 The host self-registers on the first heartbeat.
 
+The agent runs as the dedicated `watchtower` user with journal/docker group
+access (systemd-journal, adm, docker), no capabilities, and
+`NoNewPrivileges=yes`. Certificate paths under `/etc/ssl/private` need
+group access — set `cert_paths` to readable locations if needed.
+
 ## Known M1 limitations
 
 - Spool is capped at 10 MB (drops new batches with a loud log beyond that; backoff is a fixed 30 s heartbeat-throttle — exponential backoff is M2)

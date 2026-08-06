@@ -30,6 +30,11 @@ if [ -z "$BINARY_SRC" ]; then
 fi
 install -m 0755 "$BINARY_SRC" "$INSTALL_DIR/watchtower-agent"
 
+echo "==> creating service user"
+if ! getent passwd watchtower >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin watchtower
+fi
+
 echo "==> writing config"
 mkdir -p "$CONFIG_DIR" "$SPOOL_DIR"
 cat > "$CONFIG_DIR/agent.toml" <<EOF
@@ -40,6 +45,9 @@ poll_interval_secs = 15
 heartbeat_secs = 30
 spool_dir = "$SPOOL_DIR"
 EOF
+chown -R watchtower:watchtower "$SPOOL_DIR"
+chown watchtower:watchtower "$CONFIG_DIR/agent.toml"
+chmod 600 "$CONFIG_DIR/agent.toml"
 
 echo "==> installing systemd unit"
 cat > "/etc/systemd/system/$UNIT_NAME" <<UNIT
@@ -49,12 +57,19 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+User=watchtower
+Group=watchtower
+SupplementaryGroups=systemd-journal adm docker
 ExecStart=$INSTALL_DIR/watchtower-agent run
 Restart=always
 RestartSec=5
-NoNewPrivileges=no
+NoNewPrivileges=yes
 ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
 ReadWritePaths=$SPOOL_DIR
+RuntimeDirectory=watchtower
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

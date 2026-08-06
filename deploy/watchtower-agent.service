@@ -4,12 +4,19 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+User=watchtower
+Group=watchtower
+SupplementaryGroups=systemd-journal adm docker
 ExecStart=/usr/local/bin/watchtower-agent run
 Restart=always
 RestartSec=5
-NoNewPrivileges=no
+NoNewPrivileges=yes
 ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
 ReadWritePaths=/var/lib/watchtower/spool
+RuntimeDirectory=watchtower
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target
