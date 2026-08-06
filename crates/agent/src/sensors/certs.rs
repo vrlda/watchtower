@@ -45,7 +45,6 @@ pub fn expand_paths(raw: &[String]) -> Vec<String> {
 pub fn default_cert_paths() -> Vec<String> {
     vec![
         "/etc/letsencrypt/live/*/cert.pem".into(),
-        "/etc/ssl/certs/*.pem".into(),
         "/etc/ssl/private/*.pem".into(),
         "/etc/nginx/*.pem".into(),
     ]
@@ -133,6 +132,21 @@ mod tests {
         assert_eq!(cert_severity(expires_in_30d, now, &cfg), Severity::Info);
         let expired = wt_common::civil::parse_gm_date("Aug 1 00:00:00 2026").unwrap();
         assert_eq!(cert_severity(expired, now, &cfg), Severity::Critical);
+    }
+
+    #[test]
+    fn expand_paths_resolves_globs_and_files() {
+        let dir = std::env::temp_dir().join(format!("certs-expand-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("live/example.com")).unwrap();
+        let cert = dir.join("live/example.com/cert.pem");
+        std::fs::write(&cert, "-----BEGIN CERTIFICATE-----\n").unwrap();
+        let glob = dir.join("live/*/cert.pem");
+        let paths = expand_paths(&[
+            glob.to_string_lossy().into_owned(),
+            "/definitely/missing.pem".into(),
+        ]);
+        assert_eq!(paths, vec![cert.to_string_lossy().into_owned()]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

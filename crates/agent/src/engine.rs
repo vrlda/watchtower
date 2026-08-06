@@ -197,7 +197,7 @@ impl AgentState {
                 .collect(),
             error_counts: Default::default(),
             cert_paths: if cfg.cert_paths.is_empty() {
-                crate::sensors::certs::default_cert_paths()
+                crate::sensors::certs::expand_paths(&crate::sensors::certs::default_cert_paths())
             } else {
                 crate::sensors::certs::expand_paths(&cfg.cert_paths)
             },
