@@ -204,19 +204,50 @@ pub struct AgentState {
     pub known_exes: Option<std::collections::HashSet<String>>,
     /// Last process scan time (ms); gates the /proc walk.
     pub last_proc_scan: i64,
+    /// State persisted across restarts (seen-IPs, journal cursor, baselines).
+    pub persisted: crate::state::PersistedState,
 }
 
 impl AgentState {
     pub fn new(cfg: &Config, host_id: &str) -> Self {
+        let persisted = if cfg.state_file.is_empty() {
+            crate::state::PersistedState::default()
+        } else {
+            crate::state::load(std::path::Path::new(&cfg.state_file))
+        };
+        let mut ssh_seen = SeenIps::default();
+        ssh_seen.extend(persisted.seen_ips.iter().cloned());
+        // Restore the journal cursor from persisted state — but only when it
+        // is recent: a stale cursor (>1h old, or a long-down agent) reseeds to
+        // now, otherwise the whole downtime gap would be re-read and old
+        // events re-emitted. A zero cursor means nothing was ever saved;
+        // main.rs seeds it to now on first run (a full-journal read since
+        // epoch would blow the journalctl timeout).
+        let journal_since_ms = {
+            let c = persisted.journal_cursor_ms;
+            if c > 0 && c < now_ms() - 3_600_000 {
+                now_ms()
+            } else {
+                c
+            }
+        };
+        // Only seed the exec baseline when a prior run actually saved one —
+        // an empty persisted set is ambiguous, so a fresh/never-baselined
+        // state leaves known_exes = None and this run re-baselines.
+        let known_exes = if persisted.known_exes.is_empty() {
+            None
+        } else {
+            Some(persisted.known_exes.iter().cloned().collect())
+        };
         AgentState {
             cpu: CpuState::new(20, cfg.cpu_spike_ratio, host_id),
             crash: crate::sensors::systemd::CrashTracker::new(120),
-            ssh_seen: SeenIps::default(),
+            ssh_seen,
             ssh_brute: BruteForceTracker::new(cfg.ssh_brute_threshold, cfg.ssh_brute_window_secs),
             net: NetState::default(),
             docker: crate::sensors::docker::ContainerTracker::default(),
             reboot: RebootDetector::default(),
-            journal_since_ms: 0,
+            journal_since_ms,
             fim_rx: None,
             error_regexes: cfg
                 .error_patterns
@@ -235,13 +266,29 @@ impl AgentState {
             } else {
                 crate::sensors::certs::expand_paths(&cfg.cert_paths)
             },
-            last_cert_scan: 0,
+            last_cert_scan: persisted.last_cert_scan,
             access_tails: Default::default(),
             request_counts: Default::default(),
             persistence_snapshot: None,
             persistence_scan: 0,
-            known_exes: None,
+            known_exes,
             last_proc_scan: 0,
+            persisted,
+        }
+    }
+
+    /// Copy the live sensor state back into `persisted` so the next periodic
+    /// save captures it. known_exes is only written when a baseline exists —
+    /// until then the previous baseline (if any) is preserved, not clobbered
+    /// with an empty set.
+    pub fn sync_persisted(&mut self) {
+        self.persisted.seen_ips = self.ssh_seen.all();
+        self.persisted.journal_cursor_ms = self.journal_since_ms;
+        self.persisted.last_cert_scan = self.last_cert_scan;
+        if let Some(exes) = &self.known_exes {
+            let mut v: Vec<String> = exes.iter().cloned().collect();
+            v.sort();
+            self.persisted.known_exes = v;
         }
     }
 
@@ -249,6 +296,16 @@ impl AgentState {
     pub fn for_tests() -> Self {
         AgentState::new(&Config::default(), "h-1")
     }
+}
+
+/// Wall-clock unix millis — used only for first-run / stale-cursor seeding
+/// in AgentState::new; run_once gets its ts from the caller, the single time
+/// source for a batch.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// One detection pass: run all sensors against current state, apply dedup,
@@ -1353,6 +1410,46 @@ mod tests {
             "4 requests >= threshold 3"
         );
         std::fs::remove_file(&log).ok();
+    }
+
+    #[test]
+    fn journal_cursor_restores_from_state_file() {
+        let state_file =
+            std::env::temp_dir().join(format!("wt-state-engine-{}", std::process::id()));
+        crate::state::save(
+            &state_file,
+            &crate::state::PersistedState {
+                seen_ips: vec![],
+                journal_cursor_ms: 1_758_000_000_100, // past the fake line's ts
+                last_cert_scan: 0,
+                known_exes: vec![],
+            },
+        );
+        let cfg = Config {
+            state_file: state_file.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut state = AgentState::new(&cfg, "h-1");
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let lines = r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted publickey for deploy from 198.51.100.24 port 51234 ssh2"}"#;
+        let runners = runners_with("", lines, "");
+        let mut deduper = Deduper::new(300);
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_000_200,
+            &p,
+            &runners,
+            &mut state,
+        );
+        assert!(
+            !evs.iter().any(|e| e.kind == EventKind::SshLogin),
+            "cursor past the line → skipped"
+        );
+        std::fs::remove_file(&state_file).ok();
     }
 
     struct FakeSys {

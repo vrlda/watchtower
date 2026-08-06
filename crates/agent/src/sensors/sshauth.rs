@@ -128,8 +128,8 @@ fn parse_user_ip(rest: &str) -> Option<(&str, &str)> {
     Some((user, ip))
 }
 
-/// First-seen source IP tracking. In-memory only — a restart resets history
-/// (documented debt; persistence is post-MVP).
+/// First-seen source IP tracking. Seeded from persisted state at startup and
+/// synced back periodically (see AgentState::sync_persisted).
 #[derive(Default)]
 pub struct SeenIps {
     ips: HashSet<String>,
@@ -138,6 +138,18 @@ pub struct SeenIps {
 impl SeenIps {
     pub fn is_first(&mut self, ip: &str) -> bool {
         self.ips.insert(ip.to_string())
+    }
+
+    /// Seed the set from persisted state (restored on startup).
+    pub fn extend(&mut self, ips: impl IntoIterator<Item = String>) {
+        self.ips.extend(ips);
+    }
+
+    /// Snapshot of the set for persistence (sorted for deterministic output).
+    pub fn all(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.ips.iter().cloned().collect();
+        v.sort();
+        v
     }
 }
 

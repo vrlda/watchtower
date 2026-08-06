@@ -181,6 +181,10 @@ pub struct Config {
     pub scan_window_secs: i64,
     /// Seconds between process-snapshot scans (suspicious exec detection).
     pub process_scan_interval_secs: i64,
+    /// Agent state file (seen-IPs, journal cursor, baselines) — persisted
+    /// across restarts. Empty = no persistence.
+    #[serde(default)]
+    pub state_file: String,
 }
 
 impl Default for Config {
@@ -219,6 +223,7 @@ impl Default for Config {
             scan_threshold: 25,
             scan_window_secs: 10,
             process_scan_interval_secs: 30,
+            state_file: "/var/lib/watchtower/agent-state.json".into(),
         }
     }
 }

@@ -7,6 +7,7 @@ mod journald;
 mod logs;
 mod procfs;
 mod sensors;
+mod state;
 mod telemetry;
 
 use std::path::PathBuf;
@@ -108,9 +109,12 @@ fn main() {
                 let mark = if row.ok { "ok" } else { "WARN" };
                 eprintln!("[audit] {}: {} — {}", mark, row.name, row.detail);
             }
-            // Seed the journal cursor to now (ms): reading the whole journal
-            // since epoch on first start would blow the 10s timeout.
-            state.journal_since_ms = now_ms();
+            // Seed the journal cursor to now only when persisted state did
+            // not restore one: reading the whole journal since epoch on
+            // first start would blow the 10s timeout.
+            if state.journal_since_ms == 0 {
+                state.journal_since_ms = now_ms();
+            }
             #[cfg(target_os = "linux")]
             if !cfg.watch_paths.is_empty() || cfg.watch_authorized_keys {
                 let mut watch_paths = cfg.watch_paths.clone();
@@ -142,6 +146,7 @@ fn main() {
                 }
             }
             let mut last_heartbeat = Instant::now() - Duration::from_secs(cfg.heartbeat_secs + 1);
+            let mut last_state_save = 0i64;
             loop {
                 let evs = engine::run_once(
                     &cfg,
@@ -183,6 +188,14 @@ fn main() {
                         eprintln!("heartbeat failed: {:?}", e);
                     }
                     last_heartbeat = Instant::now();
+                }
+                // persist agent state every ~60s (crash loses at most one interval)
+                if now_ms() - last_state_save >= 60_000 {
+                    last_state_save = now_ms();
+                    state.sync_persisted();
+                    if !cfg.state_file.is_empty() {
+                        crate::state::save(&PathBuf::from(&cfg.state_file), &state.persisted);
+                    }
                 }
                 std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs));
             }
