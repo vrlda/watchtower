@@ -43,6 +43,9 @@ Control plane core (`watchtower-server`):
 - Web UI at `http://127.0.0.1:8787/` (token prompt; evidence expandable).
   Serve from the repo root, or set `WATCHTOWER_UI_DIR` for installed deploys.
 - Integration check: `./scripts/integration-test.sh`
+- Per-host tokens: `[host_tokens] host-a = "token"` in server.toml — an
+  agent presenting a per-host token is attributed to that host (its payload
+  host_id is overridden; spoofing requires the token).
 - M3 security sensors: see M1 status above. Config keys: `watch_paths`,
   `ssh_brute_threshold`, `ssh_brute_window_secs` in agent.toml.
 - M5 config keys: `error_patterns`, `error_window_secs`, `error_threshold`,

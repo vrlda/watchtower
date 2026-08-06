@@ -18,6 +18,10 @@ pub(crate) const MAX_BODY_BYTES: usize = 12 * 1024 * 1024;
 /// POST /v1/telemetry — idempotent per event id (INSERT OR IGNORE), so agent
 /// retries and spool re-drains never double-count.
 pub async fn ingest(State(state): State<AppState>, request: Request) -> Response {
+    let host = request
+        .extensions()
+        .get::<crate::auth::ResolvedHost>()
+        .and_then(|h| h.0.clone());
     let (_, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, state.max_body_bytes).await else {
         return (
@@ -40,7 +44,13 @@ pub async fn ingest(State(state): State<AppState>, request: Request) -> Response
         )
             .into_response();
     }
-    match store_events(&state.pool, &payload.batch).await {
+    let mut batch = payload.batch;
+    if let Some(host) = host {
+        for ev in &mut batch {
+            ev.host_id = host.clone();
+        }
+    }
+    match store_events(&state.pool, &batch).await {
         Ok((accepted, duplicates)) => {
             Json(json!({ "accepted": accepted, "duplicates": duplicates })).into_response()
         }
@@ -195,6 +205,32 @@ mod tests {
         let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
         assert_eq!(second_json["accepted"], 0);
         assert_eq!(second_json["duplicates"], 1);
+    }
+
+    #[tokio::test]
+    async fn per_host_token_forces_host_id() {
+        let state = AppState::for_tests().await;
+        let pool = state.pool.clone();
+        let app = build_app(state).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/telemetry")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer host-a-token")
+                    .body(Body::from(batch_body(1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row: (String,) = sqlx::query_as("SELECT host_id FROM events WHERE id = 'e-0'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.0, "host-a");
     }
 
     #[tokio::test]

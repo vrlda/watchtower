@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,7 @@ struct ServerConfigToml {
     listen: Option<String>,
     db_url: Option<String>,
     auth_token: Option<String>,
+    host_tokens: Option<HashMap<String, String>>,
     #[serde(default)]
     probe: Vec<ProbeConfig>,
     #[serde(default)]
@@ -38,6 +40,7 @@ impl From<ServerConfigToml> for ServerConfig {
             listen: t.listen.unwrap_or(defaults.listen),
             db_url: t.db_url.unwrap_or(defaults.db_url),
             auth_token: t.auth_token.unwrap_or(defaults.auth_token),
+            host_tokens: t.host_tokens.unwrap_or(defaults.host_tokens),
             probes,
             scan_interval_secs: t.scan_interval_secs.unwrap_or(defaults.scan_interval_secs),
             notify_min_interval_secs: t
@@ -65,8 +68,12 @@ pub struct ServerConfig {
     pub listen: String,
     /// sqlx database URL. "sqlite::memory:" works only for tests.
     pub db_url: String,
-    /// Shared bearer token agents must present. Per-host tokens are M6.
+    /// Shared bearer token agents must present.
     pub auth_token: String,
+    /// Per-host bearer tokens: presenting one attributes the agent to that
+    /// host (its payload host_id is overridden — spoofing requires the token).
+    #[serde(default)]
+    pub host_tokens: HashMap<String, String>,
     /// External endpoints to probe for reachability. Accepts both
     /// `[[probe]]` and `[[probes]]` TOML keys (alias for docs compatibility).
     pub probes: Vec<ProbeConfig>,
@@ -116,6 +123,7 @@ impl Default for ServerConfig {
             listen: "127.0.0.1:8787".into(),
             db_url: "sqlite:///var/lib/watchtower/watchtower.db".into(),
             auth_token: String::new(),
+            host_tokens: HashMap::new(),
             probes: Vec::new(),
             scan_interval_secs: default_scan_interval(),
             notify_min_interval_secs: default_notify_min_interval(),

@@ -3,7 +3,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::api_incidents;
-use crate::auth::{require_token, AuthToken};
+use crate::auth::{require_token, Auth};
 use crate::config::ServerConfig;
 use crate::correlation::{merged_rules, Rule};
 use crate::db;
@@ -96,6 +96,10 @@ impl AppState {
             pool,
             ServerConfig {
                 auth_token: "test-token".into(),
+                host_tokens: std::collections::HashMap::from([(
+                    "host-a".into(),
+                    "host-a-token".into(),
+                )]),
                 ..Default::default()
             },
         )
@@ -106,7 +110,10 @@ impl AppState {
 }
 
 pub async fn build_app(state: AppState) -> Router {
-    let auth_token = AuthToken(state.cfg.auth_token.clone());
+    let auth = Auth {
+        shared: state.cfg.auth_token.clone(),
+        hosts: std::sync::Arc::new(state.cfg.host_tokens.clone()),
+    };
     Router::new()
         .route("/v1/ping", get(ping))
         .route("/v1/telemetry", post(ingest::ingest))
@@ -119,7 +126,7 @@ pub async fn build_app(state: AppState) -> Router {
             "/v1/incidents/{id}/{action}",
             post(api_incidents::set_status_route),
         )
-        .layer(middleware::from_fn_with_state(auth_token, require_token))
+        .layer(middleware::from_fn_with_state(auth, require_token))
         .fallback_service(ServeDir::new(crate::ui_dir()))
         .with_state(state)
 }
