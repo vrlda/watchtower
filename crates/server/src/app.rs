@@ -25,6 +25,8 @@ pub struct AppState {
     /// the drain POST 400 and the agent would drop the whole file as
     /// "permanent".
     pub max_body_bytes: usize,
+    pub notify: crate::notify::NotifyConfig,
+    pub ui_base_url: String,
 }
 
 impl AppState {
@@ -33,6 +35,8 @@ impl AppState {
         let rules = merged_rules(&cfg.rules);
         let checker = Checker::new();
         AppState {
+            notify: cfg.notify.clone(),
+            ui_base_url: cfg.ui_base_url.clone(),
             pool,
             cfg,
             checker,

@@ -20,6 +20,8 @@ struct ServerConfigToml {
     #[serde(default)]
     rule: Vec<crate::correlation::Rule>,
     rules: Option<Vec<crate::correlation::Rule>>,
+    notify: Option<crate::notify::NotifyConfig>,
+    ui_base_url: Option<String>,
 }
 
 impl From<ServerConfigToml> for ServerConfig {
@@ -36,6 +38,8 @@ impl From<ServerConfigToml> for ServerConfig {
             probes,
             scan_interval_secs: t.scan_interval_secs.unwrap_or(defaults.scan_interval_secs),
             rules,
+            notify: t.notify.unwrap_or(defaults.notify),
+            ui_base_url: t.ui_base_url.unwrap_or(defaults.ui_base_url),
         }
     }
 }
@@ -60,6 +64,12 @@ pub struct ServerConfig {
     /// Correlation rules; entries override built-in defaults by id.
     #[serde(default)]
     pub rules: Vec<crate::correlation::Rule>,
+    /// Notification channels and per-severity routing.
+    #[serde(default)]
+    pub notify: crate::notify::NotifyConfig,
+    /// UI base URL for links in notifications.
+    #[serde(default)]
+    pub ui_base_url: String,
 }
 
 fn default_scan_interval() -> i64 {
@@ -75,6 +85,8 @@ impl Default for ServerConfig {
             probes: Vec::new(),
             scan_interval_secs: default_scan_interval(),
             rules: Vec::new(),
+            notify: crate::notify::NotifyConfig::default(),
+            ui_base_url: "http://127.0.0.1:8787".into(),
         }
     }
 }

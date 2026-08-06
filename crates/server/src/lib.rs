@@ -9,6 +9,7 @@ pub mod events;
 pub mod hosts;
 pub mod incidents;
 pub mod ingest;
+pub mod notify;
 pub mod probes;
 
 /// Directory of the static web UI. Resolution order:
