@@ -199,36 +199,40 @@ impl RetryQueue {
 
 /// Retry undelivered notifications every 10s until dropped by the queue cap.
 pub fn spawn_retry_loop(state: crate::app::AppState) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    tokio::spawn(crate::supervise::spawn_supervised("notify", move || {
+        retry_loop(state.clone())
+    }));
+}
+
+async fn retry_loop(state: crate::app::AppState) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    ticker.tick().await;
+    loop {
         ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let item = {
-                let mut queue = state.notify_queue.lock().unwrap();
-                queue.try_take()
-            };
-            let Some((url, payload, attempts)) = item else {
-                continue;
-            };
-            let url2 = url.clone();
-            let payload2 = payload.clone();
-            let ok = tokio::task::spawn_blocking(move || deliver(&url2, &payload2))
-                .await
-                .unwrap_or_else(|_| Err("join failed".into()));
-            match ok {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("notify retry failed ({e}); requeueing {}", url);
-                    state
-                        .notify_queue
-                        .lock()
-                        .unwrap()
-                        .retry(url, payload, attempts + 1);
-                }
+        let item = {
+            let mut queue = state.notify_queue.lock().unwrap();
+            queue.try_take()
+        };
+        let Some((url, payload, attempts)) = item else {
+            continue;
+        };
+        let url2 = url.clone();
+        let payload2 = payload.clone();
+        let ok = tokio::task::spawn_blocking(move || deliver(&url2, &payload2))
+            .await
+            .unwrap_or_else(|_| Err("join failed".into()));
+        match ok {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("notify retry failed ({e}); requeueing {}", url);
+                state
+                    .notify_queue
+                    .lock()
+                    .unwrap()
+                    .retry(url, payload, attempts + 1);
             }
         }
-    });
+    }
 }
 
 #[cfg(test)]

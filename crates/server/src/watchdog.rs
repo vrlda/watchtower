@@ -93,24 +93,28 @@ pub async fn watchdog_scan(state: &AppState, now: i64) -> Result<Vec<AgentEvent>
 
 /// Spawn the watchdog loop.
 pub fn spawn_watchdog(state: AppState) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    tokio::spawn(crate::supervise::spawn_supervised("watchdog", move || {
+        watchdog_loop(state.clone())
+    }));
+}
+
+async fn watchdog_loop(state: AppState) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    ticker.tick().await;
+    loop {
         ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let now = crate::ingest::now_ms();
-            match watchdog_scan(&state, now).await {
-                Ok(evs) => {
-                    for ev in &evs {
-                        let _ = crate::ingest::store_events(&state.pool, std::slice::from_ref(ev))
-                            .await;
-                        eprintln!("watchdog: {}", ev.summary);
-                    }
+        let now = crate::ingest::now_ms();
+        match watchdog_scan(&state, now).await {
+            Ok(evs) => {
+                for ev in &evs {
+                    let _ =
+                        crate::ingest::store_events(&state.pool, std::slice::from_ref(ev)).await;
+                    eprintln!("watchdog: {}", ev.summary);
                 }
-                Err(e) => eprintln!("watchdog scan failed: {e}"),
             }
+            Err(e) => eprintln!("watchdog scan failed: {e}"),
         }
-    });
+    }
 }
 
 #[cfg(test)]

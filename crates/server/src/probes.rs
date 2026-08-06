@@ -143,9 +143,8 @@ pub async fn store_probe_events(pool: &sqlx::SqlitePool, events: &[AgentEvent]) 
     }
 }
 
-/// Spawn one background task per probe; loop forever. The first tick is
-/// skipped (interval's immediate first tick) so probes don't all fire at
-/// startup.
+/// Spawn one supervised background task per probe. The first tick is skipped
+/// (interval's immediate first tick) so probes don't all fire at startup.
 pub fn spawn_probe_tasks(state: AppState, probes: Vec<ProbeConfig>) {
     for probe in probes {
         if probe.url.is_empty() {
@@ -153,23 +152,26 @@ pub fn spawn_probe_tasks(state: AppState, probes: Vec<ProbeConfig>) {
         }
         let state = state.clone();
         let url = probe.url.clone();
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(probe.interval_secs.max(1)));
-            interval.tick().await; // first tick fires immediately; skip it
-            loop {
-                interval.tick().await;
-                let evs = state
-                    .checker
-                    .tick_all(std::slice::from_ref(&probe), crate::ingest::now_ms())
-                    .await;
-                store_probe_events(&state.pool, &evs).await;
-                for ev in &evs {
-                    eprintln!("probe: {}", ev.summary);
-                }
-            }
-        });
+        tokio::spawn(crate::supervise::spawn_supervised("probe", move || {
+            probe_loop(state.clone(), probe.clone())
+        }));
         eprintln!("probe task started: {}", url);
+    }
+}
+
+async fn probe_loop(state: AppState, probe: ProbeConfig) {
+    let mut interval = tokio::time::interval(Duration::from_secs(probe.interval_secs.max(1)));
+    interval.tick().await; // first tick fires immediately; skip it
+    loop {
+        interval.tick().await;
+        let evs = state
+            .checker
+            .tick_all(std::slice::from_ref(&probe), crate::ingest::now_ms())
+            .await;
+        store_probe_events(&state.pool, &evs).await;
+        for ev in &evs {
+            eprintln!("probe: {}", ev.summary);
+        }
     }
 }
 

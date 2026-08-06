@@ -11,6 +11,7 @@ pub mod incidents;
 pub mod ingest;
 pub mod notify;
 pub mod probes;
+pub mod supervise;
 pub mod watchdog;
 
 /// Directory of the static web UI. Resolution order:

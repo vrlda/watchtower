@@ -436,36 +436,38 @@ pub async fn recently_resolved(
 
 /// Spawn the correlation loop: scan every interval, notify on changes.
 pub fn spawn_runner(state: crate::app::AppState) {
+    tokio::spawn(crate::supervise::spawn_supervised(
+        "correlation",
+        move || scan_loop(state.clone()),
+    ));
+}
+
+async fn scan_loop(state: crate::app::AppState) {
     let interval = state.cfg.scan_interval_secs.max(5); // clamp: never scan faster than every 5s
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval as u64));
-        ticker.tick().await; // skip immediate
-        loop {
-            ticker.tick().await;
-            let now = crate::ingest::now_ms();
-            match scan_and_absorb(&state.pool, &state.rules, now).await {
-                Ok(changed) => {
-                    if changed.is_empty() {
-                        continue;
-                    }
-                    for inc in &changed {
-                        eprintln!("incident {}: {} [{}]", inc.id, inc.headline, inc.severity);
-                        let json = crate::api_incidents::incident_json(inc);
-                        let failed = crate::notify::notify_incident(
-                            &state.notify,
-                            &json,
-                            &state.ui_base_url,
-                        )
-                        .await;
-                        for (url, payload) in failed {
-                            state.notify_queue.lock().unwrap().push(url, payload);
-                        }
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval as u64));
+    ticker.tick().await; // skip immediate
+    loop {
+        ticker.tick().await;
+        let now = crate::ingest::now_ms();
+        match scan_and_absorb(&state.pool, &state.rules, now).await {
+            Ok(changed) => {
+                if changed.is_empty() {
+                    continue;
+                }
+                for inc in &changed {
+                    eprintln!("incident {}: {} [{}]", inc.id, inc.headline, inc.severity);
+                    let json = crate::api_incidents::incident_json(inc);
+                    let failed =
+                        crate::notify::notify_incident(&state.notify, &json, &state.ui_base_url)
+                            .await;
+                    for (url, payload) in failed {
+                        state.notify_queue.lock().unwrap().push(url, payload);
                     }
                 }
-                Err(e) => eprintln!("correlation scan failed: {e}"),
             }
+            Err(e) => eprintln!("correlation scan failed: {e}"),
         }
-    });
+    }
 }
 
 #[cfg(test)]
