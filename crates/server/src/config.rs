@@ -116,10 +116,17 @@ impl Default for ServerConfig {
 }
 
 /// Apply the Telegram env overrides (the "1-2 line" setup):
-/// TELEGRAM_BOT_TOKEN (required for the channel) and the optional
+/// TELEGRAM_BOT_TOKEN (required for the channel), the optional
 /// TELEGRAM_CHAT_ID (pins the target chat; without it, the chat is
-/// auto-discovered from the bot's updates).
-pub fn apply_telegram_env(cfg: &mut ServerConfig, token: Option<String>, chat: Option<String>) {
+/// auto-discovered from the bot's updates), and the optional
+/// TELEGRAM_BOT_PASSWORD (requires the password handshake before a chat
+/// can register).
+pub fn apply_telegram_env(
+    cfg: &mut ServerConfig,
+    token: Option<String>,
+    chat: Option<String>,
+    password: Option<String>,
+) {
     if let Some(t) = token {
         cfg.notify.telegram_token = Some(t);
     }
@@ -128,6 +135,9 @@ pub fn apply_telegram_env(cfg: &mut ServerConfig, token: Option<String>, chat: O
             Ok(id) => cfg.notify.telegram_chat_id = Some(id),
             Err(_) => eprintln!("invalid TELEGRAM_CHAT_ID {:?} — ignoring", c),
         }
+    }
+    if let Some(p) = password {
+        cfg.notify.telegram_password = Some(p);
     }
 }
 
@@ -146,6 +156,7 @@ pub fn load(path: &PathBuf) -> ServerConfig {
         &mut cfg,
         std::env::var("TELEGRAM_BOT_TOKEN").ok(),
         std::env::var("TELEGRAM_CHAT_ID").ok(),
+        std::env::var("TELEGRAM_BOT_PASSWORD").ok(),
     );
     cfg
 }
@@ -184,11 +195,18 @@ mod tests {
     #[test]
     fn telegram_env_overrides_apply() {
         let mut cfg = ServerConfig::default();
-        apply_telegram_env(&mut cfg, Some("tok".into()), Some("12345".into()));
+        apply_telegram_env(
+            &mut cfg,
+            Some("tok".into()),
+            Some("12345".into()),
+            Some("pw".into()),
+        );
         assert_eq!(cfg.notify.telegram_token.as_deref(), Some("tok"));
         assert_eq!(cfg.notify.telegram_chat_id, Some(12345));
+        assert_eq!(cfg.notify.telegram_password.as_deref(), Some("pw"));
         let mut cfg2 = ServerConfig::default();
-        apply_telegram_env(&mut cfg2, Some("tok".into()), Some("abc".into()));
+        apply_telegram_env(&mut cfg2, Some("tok".into()), Some("abc".into()), None);
         assert_eq!(cfg2.notify.telegram_chat_id, None);
+        assert_eq!(cfg2.notify.telegram_password, None);
     }
 }

@@ -56,12 +56,19 @@ Incidents, correlation, notifications: M4.
     TELEGRAM_BOT_TOKEN=<bot token> watchtower-server --config server.toml
     # optional: pin the target chat (multi-server setups)
     TELEGRAM_CHAT_ID=123456789 watchtower-server --config server.toml
+    # optional: require a password before a chat can register
+    TELEGRAM_BOT_PASSWORD=<secret> watchtower-server --config server.toml
 
 Message the bot once (e.g. /start) — without TELEGRAM_CHAT_ID the chat is
 auto-discovered from the bot's first update. With TELEGRAM_CHAT_ID the chat
 is pinned and no discovery is needed — every server reports into the same
 channel. All Critical and Warning incidents notify to that single channel
 by default (routing is editable in server.toml `[notify.routing]`).
+
+With a password set, message the bot /start — it replies asking for the
+password; send it and the chat is registered. Without a password, the
+first chat to message the bot becomes the target (anyone who finds the
+bot could register — set a password in shared deployments).
 
 Multiple servers: run one `watchtower-server` per site, each with the same
 bot token (+ optional chat id) — incidents from every site land in the one

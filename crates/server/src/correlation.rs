@@ -1075,6 +1075,7 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
                 slack_url: String::new(),
                 telegram_token: None,
                 telegram_chat_id: None,
+                telegram_password: None,
                 routing: std::collections::HashMap::from([
                     ("Critical".into(), vec!["webhook".into()]),
                     ("Warning".into(), vec!["webhook".into()]),

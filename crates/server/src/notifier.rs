@@ -75,6 +75,7 @@ mod tests {
             slack_url: String::new(),
             telegram_token: None,
             telegram_chat_id: None,
+            telegram_password: None,
             routing: std::collections::HashMap::from([
                 ("Critical".into(), vec!["webhook".into()]),
                 ("Warning".into(), vec!["webhook".into()]),

@@ -19,6 +19,7 @@ pub struct NotifyConfig {
     pub slack_url: String,
     pub telegram_token: Option<String>,
     pub telegram_chat_id: Option<i64>,
+    pub telegram_password: Option<String>,
     pub routing: HashMap<String, Vec<String>>,
 }
 
@@ -29,6 +30,7 @@ impl Default for NotifyConfig {
             slack_url: String::new(),
             telegram_token: None,
             telegram_chat_id: None,
+            telegram_password: None,
             routing: default_routing(),
         }
     }
@@ -165,26 +167,8 @@ pub fn telegram_payload(incident_json: &serde_json::Value, ui_base_url: &str) ->
 
 /// GET the bot's updates; return the first chat id found.
 pub fn resolve_chat_id(api_base: &str, token: &str) -> Result<Option<i64>, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
-    let url = format!("{}/bot{}/getUpdates", api_base.trim_end_matches('/'), token);
-    let body: serde_json::Value = agent
-        .get(&url)
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_json()
-        .map_err(|e| e.to_string())?;
-    if body["ok"] != true {
-        return Ok(None);
-    }
-    Ok(body["result"].as_array().and_then(|updates| {
-        updates.iter().find_map(|u| {
-            u["message"]["chat"]["id"]
-                .as_i64()
-                .or_else(|| u["my_chat_member"]["chat"]["id"].as_i64())
-        })
-    }))
+    let updates = resolve_updates_sync(api_base, token)?;
+    Ok(resolve_chat_id_from_updates(&updates))
 }
 
 /// Send a text message to the bot's chat, resolving the chat if unknown.
@@ -219,6 +203,120 @@ pub fn telegram_send(client: &TelegramClient, api_base: &str, text: &str) -> Res
         .send_string(&serde_json::json!({ "chat_id": chat, "text": text }).to_string())
         .map_err(|e| e.to_string())?;
     Ok((200..300).contains(&resp.status()))
+}
+
+// ---------- Telegram registration handshake ----------
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RegStep {
+    Noop,             // no password configured → legacy discovery
+    AskPassword,      // reply: please send the password
+    Register(String), // password accepted → register this chat
+    Reject,           // awaiting + wrong password
+    Ignore,           // nothing to do
+}
+
+/// Pure: one step of the registration state machine.
+/// `awaiting` = the chat sent /start and is waiting for the password.
+pub fn registrar_step(password: Option<&str>, chat: &str, text: &str, awaiting: bool) -> RegStep {
+    let Some(pw) = password else {
+        return RegStep::Noop;
+    };
+    match text.trim() {
+        "/start" => RegStep::AskPassword,
+        t => {
+            if awaiting && constant_time_eq(t, pw) {
+                RegStep::Register(chat.to_string())
+            } else if awaiting {
+                RegStep::Reject
+            } else {
+                RegStep::Ignore
+            }
+        }
+    }
+}
+
+/// Timing-safe string comparison.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+/// Extract (chat_id, text) from a getUpdates entry; None for the bot's own
+/// messages and non-message updates.
+pub fn update_chat_and_text(update: &serde_json::Value) -> Option<(i64, String)> {
+    let msg = update.get("message")?;
+    if msg["from"]["is_bot"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let chat = msg["chat"]["id"].as_i64()?;
+    let text = msg["text"].as_str()?.to_string();
+    Some((chat, text))
+}
+
+/// getUpdates result array (sync core — ureq is blocking; the async
+/// wrapper and `resolve_chat_id` share it).
+fn resolve_updates_sync(api_base: &str, token: &str) -> Result<Vec<serde_json::Value>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let url = format!("{}/bot{}/getUpdates", api_base.trim_end_matches('/'), token);
+    let body: serde_json::Value = agent
+        .get(&url)
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    Ok(body["result"].as_array().cloned().unwrap_or_default())
+}
+
+/// getUpdates result array.
+pub async fn resolve_updates(
+    api_base: &str,
+    token: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    resolve_updates_sync(api_base, token)
+}
+
+/// First chat id found across updates (message or my_chat_member).
+pub fn resolve_chat_id_from_updates(updates: &[serde_json::Value]) -> Option<i64> {
+    updates.iter().find_map(|u| {
+        u["message"]["chat"]["id"]
+            .as_i64()
+            .or_else(|| u["my_chat_member"]["chat"]["id"].as_i64())
+    })
+}
+
+/// Direct sendMessage to a specific chat.
+pub async fn send_to_chat(
+    api_base: &str,
+    token: &str,
+    chat_id: i64,
+    text: &str,
+) -> Result<(), String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let url = format!(
+        "{}/bot{}/sendMessage",
+        api_base.trim_end_matches('/'),
+        token
+    );
+    let resp = agent
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&serde_json::json!({ "chat_id": chat_id, "text": text }).to_string())
+        .map_err(|e| e.to_string())?;
+    if (200..300).contains(&resp.status()) {
+        Ok(())
+    } else {
+        Err(format!("http {}", resp.status()))
+    }
 }
 
 /// Module-level client built once from the configured token. Token changes
@@ -413,6 +511,73 @@ pub fn spawn_retry_loop(state: crate::app::AppState) {
     }));
 }
 
+/// Poll getUpdates, run the handshake, reply via sendMessage, and register
+/// the chat in the shared client cache. Tracks processed update_ids — with
+/// no-offset getUpdates, updates re-deliver; without dedup every poll would
+/// re-prompt the operator.
+pub fn spawn_telegram_registrar(state: crate::app::AppState) {
+    let Some(token) = state.notify.telegram_token.clone() else {
+        return;
+    };
+    let Some(password) = state.notify.telegram_password.clone() else {
+        return; // legacy first-chat discovery — no handshake needed
+    };
+    tokio::spawn(async move {
+        let mut seen: std::collections::HashSet<i64> = Default::default();
+        let mut awaiting: std::collections::HashMap<i64, bool> = Default::default();
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Ok(updates) = resolve_updates(TELEGRAM_API, &token).await else {
+                continue;
+            };
+            for u in &updates {
+                let Some(update_id) = u["update_id"].as_i64() else {
+                    continue;
+                };
+                if !seen.insert(update_id) {
+                    continue;
+                }
+                let Some((chat, text)) = update_chat_and_text(u) else {
+                    continue;
+                };
+                let is_awaiting = *awaiting.get(&chat).unwrap_or(&false);
+                match registrar_step(Some(&password), &chat.to_string(), &text, is_awaiting) {
+                    RegStep::AskPassword => {
+                        awaiting.insert(chat, true);
+                        let _ = send_to_chat(
+                            TELEGRAM_API,
+                            &token,
+                            chat,
+                            "Send the password to register this chat.",
+                        )
+                        .await;
+                    }
+                    RegStep::Register(_) => {
+                        awaiting.remove(&chat);
+                        if let Some(client) = telegram_client(Some(&token), None) {
+                            *client.chat_id.lock().unwrap() = Some(chat);
+                        }
+                        let _ = send_to_chat(
+                            TELEGRAM_API,
+                            &token,
+                            chat,
+                            "Chat registered — notifications will be sent here.",
+                        )
+                        .await;
+                        eprintln!("telegram: chat {} registered", chat);
+                    }
+                    RegStep::Reject => {
+                        let _ = send_to_chat(TELEGRAM_API, &token, chat, "Wrong password.").await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+}
+
 async fn retry_loop(state: crate::app::AppState) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
     ticker.tick().await;
@@ -519,6 +684,7 @@ mod tests {
             slack_url: "http://s".into(),
             telegram_token: None,
             telegram_chat_id: None,
+            telegram_password: None,
             routing: default_routing(),
         };
         let c = channels_for(&cfg, "Critical");
@@ -810,5 +976,68 @@ mod tests {
             "chat resolved and cached"
         );
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn registrar_state_machine_handshake() {
+        assert_eq!(
+            registrar_step(None, "chat-1", "/start", false),
+            RegStep::Noop
+        );
+        let pw = Some("hunter2".to_string());
+        assert_eq!(
+            registrar_step(pw.as_deref(), "chat-1", "/start", false),
+            RegStep::AskPassword
+        );
+        assert_eq!(
+            registrar_step(pw.as_deref(), "chat-1", "hunter2", true),
+            RegStep::Register("chat-1".into())
+        );
+        assert_eq!(
+            registrar_step(pw.as_deref(), "chat-1", "wrong", true),
+            RegStep::Reject
+        );
+        assert_eq!(
+            registrar_step(pw.as_deref(), "chat-1", "hunter2", false),
+            RegStep::Ignore,
+            "must /start first"
+        );
+        assert_eq!(
+            registrar_step(pw.as_deref(), "chat-1", "hello", false),
+            RegStep::Ignore
+        );
+    }
+
+    #[test]
+    fn registrar_extracts_chat_and_text_from_update() {
+        let u: serde_json::Value = serde_json::from_str(
+            r#"{"update_id":7,"message":{"chat":{"id":12345},"from":{"is_bot":false},"text":"/start"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            update_chat_and_text(&u),
+            Some((12345, "/start".to_string()))
+        );
+        let bot_msg: serde_json::Value = serde_json::from_str(
+            r#"{"update_id":8,"message":{"chat":{"id":12345},"from":{"is_bot":true},"text":"/start"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            update_chat_and_text(&bot_msg),
+            None,
+            "the bot's own messages are filtered"
+        );
+        let no_text: serde_json::Value = serde_json::from_str(
+            r#"{"update_id":9,"message":{"chat":{"id":1},"from":{"is_bot":false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(update_chat_and_text(&no_text), None);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_and_mismatches() {
+        assert!(constant_time_eq("hunter2", "hunter2"));
+        assert!(!constant_time_eq("hunter2", "hunter3"));
+        assert!(!constant_time_eq("a", "bb"));
     }
 }
