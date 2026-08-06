@@ -98,7 +98,7 @@ fn incident_select() -> String {
 /// were linked.
 #[allow(clippy::too_many_arguments)] // signature spec'd by M4 plan; Task 4 depends on it
 pub async fn create_incident(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     key: &str,
     host_id: &str,
     severity: &str,
@@ -115,7 +115,7 @@ pub async fn create_incident(
     sqlx::query(
         "INSERT INTO incidents
          (id, key, host_id, severity, status, headline, cause, actions_json, affected_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?7, ?8, ?9, ?9)",
+         VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $9)",
     )
     .bind(&id)
     .bind(key)
@@ -148,11 +148,11 @@ pub async fn create_incident(
 
 /// Find an open/acknowledged incident by key (absorb target).
 pub async fn find_open_by_key(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     key: &str,
 ) -> Result<Option<Incident>, sqlx::Error> {
     let query = format!(
-        "{} WHERE key = ?1 AND status != 'resolved' LIMIT 1",
+        "{} WHERE key = $1 AND status != 'resolved' LIMIT 1",
         incident_select()
     );
     let row = sqlx::query_as::<_, IncidentRow>(&query)
@@ -167,36 +167,43 @@ pub async fn find_open_by_key(
 /// JOIN works even for events the engine passes directly; pre-stored events
 /// make this a no-op.
 pub async fn link_events(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     incident_id: &str,
     events: &[AgentEvent],
 ) -> Result<usize, sqlx::Error> {
     let mut new = 0usize;
     let mut tx = pool.begin().await?;
+    let events_sql = if crate::db::is_postgres(pool) {
+        "INSERT INTO events (id, ts, host_id, key, kind, severity, summary, evidence_json, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO events (id, ts, host_id, key, kind, severity, summary, evidence_json, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+    };
+    let links_sql = if crate::db::is_postgres(pool) {
+        "INSERT INTO incident_events (incident_id, event_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO incident_events (incident_id, event_id) VALUES ($1, $2)"
+    };
     for ev in events {
         let evidence = serde_json::to_string(&ev.evidence).unwrap_or_else(|_| "[]".into());
-        sqlx::query(
-            "INSERT OR IGNORE INTO events (id, ts, host_id, key, kind, severity, summary, evidence_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        )
-        .bind(&ev.id)
-        .bind(ev.ts)
-        .bind(&ev.host_id)
-        .bind(&ev.key)
-        .bind(crate::ingest::kind_wire(ev.kind))
-        .bind(crate::ingest::severity_wire(ev.severity))
-        .bind(&ev.summary)
-        .bind(evidence)
-        .bind(now_ms())
-        .execute(&mut *tx)
-        .await?;
-        let res = sqlx::query(
-            "INSERT OR IGNORE INTO incident_events (incident_id, event_id) VALUES (?1, ?2)",
-        )
-        .bind(incident_id)
-        .bind(&ev.id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query(events_sql)
+            .bind(&ev.id)
+            .bind(ev.ts)
+            .bind(&ev.host_id)
+            .bind(&ev.key)
+            .bind(crate::ingest::kind_wire(ev.kind))
+            .bind(crate::ingest::severity_wire(ev.severity))
+            .bind(&ev.summary)
+            .bind(evidence)
+            .bind(now_ms())
+            .execute(&mut *tx)
+            .await?;
+        let res = sqlx::query(links_sql)
+            .bind(incident_id)
+            .bind(&ev.id)
+            .execute(&mut *tx)
+            .await?;
         if res.rows_affected() > 0 {
             new += 1;
         }
@@ -206,12 +213,9 @@ pub async fn link_events(
 }
 
 /// Bump updated_at; returns the new updated_at.
-pub async fn touch_incident(
-    pool: &sqlx::SqlitePool,
-    incident_id: &str,
-) -> Result<i64, sqlx::Error> {
+pub async fn touch_incident(pool: &sqlx::AnyPool, incident_id: &str) -> Result<i64, sqlx::Error> {
     let now = now_ms();
-    sqlx::query("UPDATE incidents SET updated_at = ?1 WHERE id = ?2")
+    sqlx::query("UPDATE incidents SET updated_at = $1 WHERE id = $2")
         .bind(now)
         .bind(incident_id)
         .execute(pool)
@@ -221,17 +225,17 @@ pub async fn touch_incident(
 
 /// Raise the incident severity if `severity` is higher (never lower).
 pub async fn raise_severity(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     id: &str,
     severity: &str,
 ) -> Result<(), sqlx::Error> {
     // severity strings are the wire values; compare via CASE on the stored
     // order: Critical > Warning > Info
     sqlx::query(
-        "UPDATE incidents SET severity = ?2, updated_at = ?3
-         WHERE id = ?1 AND (
-            (severity = 'Info' AND ?2 != 'Info')
-            OR (severity = 'Warning' AND ?2 = 'Critical')
+        "UPDATE incidents SET severity = $2, updated_at = $3
+         WHERE id = $1 AND (
+            (severity = 'Info' AND $2 != 'Info')
+            OR (severity = 'Warning' AND $2 = 'Critical')
          )",
     )
     .bind(id)
@@ -246,7 +250,7 @@ pub async fn raise_severity(
 /// stamps the ack/resolve time, and bumps updated_at. Returns true when a
 /// row was updated (unknown id → false).
 pub async fn set_status_at(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     id: &str,
     status: IncidentStatus,
     now: i64,
@@ -260,7 +264,7 @@ pub async fn set_status_at(
         IncidentStatus::Open => unreachable!(),
     };
     let query =
-        format!("UPDATE incidents SET status = ?1, {col} = ?2, updated_at = ?2 WHERE id = ?3");
+        format!("UPDATE incidents SET status = $1, {col} = $2, updated_at = $2 WHERE id = $3");
     let res = sqlx::query(&query)
         .bind(wire)
         .bind(now)
@@ -274,7 +278,7 @@ pub async fn set_status_at(
 /// ack/resolve time, and bumps updated_at. Returns true when a row was
 /// updated (unknown id → false).
 pub async fn set_status(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     id: &str,
     status: IncidentStatus,
 ) -> Result<bool, sqlx::Error> {
@@ -283,7 +287,7 @@ pub async fn set_status(
 
 /// List summaries (no timelines), newest first.
 pub async fn list(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     status: &Option<String>,
     severity: &Option<String>,
     host: Option<&str>,
@@ -292,11 +296,11 @@ pub async fn list(
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64, i64, Option<i64>, Option<i64>)>(
         "SELECT id, key, host_id, severity, headline, status, cause, created_at, updated_at, acked_at, resolved_at
          FROM incidents
-         WHERE (?1 IS NULL OR status = ?1)
-           AND (?2 IS NULL OR severity = ?2)
-           AND (?3 IS NULL OR host_id = ?3)
+         WHERE ($1 IS NULL OR status = $1)
+           AND ($2 IS NULL OR severity = $2)
+           AND ($3 IS NULL OR host_id = $3)
          ORDER BY created_at DESC
-         LIMIT ?4",
+         LIMIT $4",
     )
     .bind(status.as_deref())
     .bind(severity.as_deref())
@@ -340,10 +344,10 @@ pub async fn list(
 
 /// Full incident with timeline, ordered (ts DESC, id) — NEVER arrival order.
 pub async fn fetch_incident(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     id: &str,
 ) -> Result<Option<Incident>, sqlx::Error> {
-    let query = format!("{} WHERE id = ?1", incident_select());
+    let query = format!("{} WHERE id = $1", incident_select());
     let row = sqlx::query_as::<_, IncidentRow>(&query)
         .bind(id)
         .fetch_optional(pool)
@@ -355,13 +359,13 @@ pub async fn fetch_incident(
 }
 
 pub async fn fetch_timeline(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     incident_id: &str,
 ) -> Result<Vec<IncidentEvent>, sqlx::Error> {
     let rows = sqlx::query_as::<_, (String, i64, String, String, String, String, String)>(
         "SELECT e.id, e.ts, e.host_id, e.kind, e.severity, e.summary, e.evidence_json
          FROM incident_events ie JOIN events e ON e.id = ie.event_id
-         WHERE ie.incident_id = ?1
+         WHERE ie.incident_id = $1
          ORDER BY e.ts DESC, e.id",
     )
     .bind(incident_id)
@@ -388,8 +392,9 @@ mod tests {
     use super::*;
     use wt_common::{AgentEvent, EventKind, Severity};
 
-    async fn pool() -> sqlx::SqlitePool {
-        let p = sqlx::sqlite::SqlitePoolOptions::new()
+    async fn pool() -> sqlx::AnyPool {
+        crate::db::ensure_any_drivers();
+        let p = sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await

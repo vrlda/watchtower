@@ -288,7 +288,7 @@ use crate::incidents::{self, Incident};
 /// Returns incidents that CHANGED (new or gained new events) — the notifier
 /// trigger. Cooldown applies to BOTH the rule pass and the fallback pass.
 pub async fn scan_and_absorb(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     rules: &[Rule],
     now: i64,
 ) -> Result<Vec<Incident>, sqlx::Error> {
@@ -417,13 +417,13 @@ pub async fn scan_and_absorb(
 /// True when a resolved incident with this key was resolved less than
 /// `cooldown_ms` ago.
 pub async fn recently_resolved(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     key: &str,
     now: i64,
     cooldown_ms: i64,
 ) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_as::<_, (Option<i64>,)>(
-        "SELECT resolved_at FROM incidents WHERE key = ?1 AND status = 'resolved' ORDER BY resolved_at DESC LIMIT 1",
+        "SELECT resolved_at FROM incidents WHERE key = $1 AND status = 'resolved' ORDER BY resolved_at DESC LIMIT 1",
     )
     .bind(key)
     .fetch_optional(pool)
@@ -850,8 +850,9 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
         );
     }
 
-    async fn pool() -> sqlx::SqlitePool {
-        let p = sqlx::sqlite::SqlitePoolOptions::new()
+    async fn pool() -> sqlx::AnyPool {
+        crate::db::ensure_any_drivers();
+        let p = sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await

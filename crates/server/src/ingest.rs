@@ -66,28 +66,32 @@ pub async fn ingest(State(state): State<AppState>, request: Request) -> Response
 }
 
 pub async fn store_events(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     batch: &[AgentEvent],
 ) -> Result<(u64, u64), sqlx::Error> {
     let mut tx = pool.begin().await?;
     let mut accepted = 0u64;
     for ev in batch {
         let evidence = serde_json::to_string(&ev.evidence).unwrap_or_else(|_| "[]".into());
-        let res = sqlx::query(
+        let sql = if crate::db::is_postgres(pool) {
+            "INSERT INTO events (id, ts, host_id, key, kind, severity, summary, evidence_json, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING"
+        } else {
             "INSERT OR IGNORE INTO events (id, ts, host_id, key, kind, severity, summary, evidence_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        )
-        .bind(&ev.id)
-        .bind(ev.ts)
-        .bind(&ev.host_id)
-        .bind(&ev.key)
-        .bind(kind_wire(ev.kind))
-        .bind(severity_wire(ev.severity))
-        .bind(&ev.summary)
-        .bind(evidence)
-        .bind(now_ms())
-        .execute(&mut *tx)
-        .await?;
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+        };
+        let res = sqlx::query(sql)
+            .bind(&ev.id)
+            .bind(ev.ts)
+            .bind(&ev.host_id)
+            .bind(&ev.key)
+            .bind(kind_wire(ev.kind))
+            .bind(severity_wire(ev.severity))
+            .bind(&ev.summary)
+            .bind(evidence)
+            .bind(now_ms())
+            .execute(&mut *tx)
+            .await?;
         if res.rows_affected() > 0 {
             accepted += 1;
         }

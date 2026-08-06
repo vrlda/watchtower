@@ -25,14 +25,14 @@ pub async fn heartbeat(State(state): State<AppState>, Json(hb): Json<Heartbeat>)
     }
 }
 
-pub async fn upsert_host(pool: &sqlx::SqlitePool, hb: &Heartbeat) -> Result<(), sqlx::Error> {
+pub async fn upsert_host(pool: &sqlx::AnyPool, hb: &Heartbeat) -> Result<(), sqlx::Error> {
     // seen-times are server-side facts (liveness); the agent's clock is not
     // trusted for these — a skewed host would break the M4 watchdog.
     let seen = crate::ingest::now_ms();
     sqlx::query(
         "INSERT INTO hosts (host_id, first_seen, last_seen, version, queue_len)
-         VALUES (?1, ?2, ?2, ?3, ?4)
-         ON CONFLICT(host_id) DO UPDATE SET last_seen = ?2, version = ?3, queue_len = ?4",
+         VALUES ($1, $2, $2, $3, $4)
+         ON CONFLICT(host_id) DO UPDATE SET last_seen = $2, version = $3, queue_len = $4",
     )
     .bind(&hb.host_id)
     .bind(seen)
@@ -64,13 +64,13 @@ pub async fn list_hosts(
 }
 
 pub async fn fetch_hosts(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     host: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
     let rows = sqlx::query_as::<_, (String, i64, i64, String, i64)>(
         "SELECT host_id, first_seen, last_seen, version, queue_len
          FROM hosts
-         WHERE (?1 IS NULL OR host_id = ?1)
+         WHERE ($1 IS NULL OR host_id = $1)
          ORDER BY host_id",
     )
     .bind(host)

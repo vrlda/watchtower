@@ -135,7 +135,7 @@ impl Checker {
 }
 
 /// Persist server-generated events (HostUnreachable) into the store.
-pub async fn store_probe_events(pool: &sqlx::SqlitePool, events: &[AgentEvent]) {
+pub async fn store_probe_events(pool: &sqlx::AnyPool, events: &[AgentEvent]) {
     for ev in events {
         if let Err(e) = crate::ingest::store_events(pool, std::slice::from_ref(ev)).await {
             eprintln!("probe store failed: {e}");

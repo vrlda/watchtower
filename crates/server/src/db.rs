@@ -1,28 +1,57 @@
-use std::str::FromStr;
-
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::Row;
 
-/// Connect to the configured database with WAL journaling (concurrent
-/// reader + writer without lock contention).
-pub async fn connect(cfg: &crate::config::ServerConfig) -> Result<sqlx::SqlitePool, sqlx::Error> {
-    let options = SqliteConnectOptions::from_str(&cfg.db_url)
-        .map_err(|e| sqlx::Error::Configuration(Box::new(e)))?
-        .journal_mode(SqliteJournalMode::Wal)
-        .create_if_missing(true);
-    SqlitePoolOptions::new()
+/// Install the sqlx any-driver backends (sqlite, postgres). Idempotent.
+/// Must run before any `AnyPool` connects, or sqlx panics ("no drivers
+/// installed"). sqlx 0.8 does not auto-install on connect.
+pub fn ensure_any_drivers() {
+    sqlx::any::install_default_drivers();
+}
+
+/// Connect to the configured database. sqlite URLs get WAL journaling
+/// (concurrent reader + writer without lock contention) and `mode=rwc` so
+/// a missing db file is created on first run (preserves the old
+/// `create_if_missing(true)` behavior, which the any driver does not set).
+pub async fn connect(cfg: &crate::config::ServerConfig) -> Result<sqlx::AnyPool, sqlx::Error> {
+    ensure_any_drivers();
+    let pool = sqlx::any::AnyPoolOptions::new()
         .max_connections(5)
-        .connect_with(options)
-        .await
+        .connect(&with_create_flag(&cfg.db_url))
+        .await?;
+    if cfg.db_url.starts_with("sqlite:") {
+        let _ = sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await;
+    }
+    Ok(pool)
+}
+
+/// SQL dialect guard: sqlite accepts INSERT OR IGNORE; postgres uses
+/// ON CONFLICT DO NOTHING. Detects the backend from the pool's connect
+/// options (sqlx 0.8 has no pool-level `any_kind()`; AnyKind is
+/// deprecated and unused).
+pub fn is_postgres(pool: &sqlx::AnyPool) -> bool {
+    let options = pool.connect_options();
+    let scheme = options.database_url.scheme();
+    scheme == "postgres" || scheme == "postgresql"
+}
+
+fn with_create_flag(url: &str) -> String {
+    if url.starts_with("sqlite:") && !url.contains(":memory:") && !url.contains("mode=") {
+        if url.contains('?') {
+            format!("{url}&mode=rwc")
+        } else {
+            format!("{url}?mode=rwc")
+        }
+    } else {
+        url.to_string()
+    }
 }
 
 /// Apply the schema. Idempotent — safe to run on every startup.
-pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+pub async fn init_schema(pool: &sqlx::AnyPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS hosts (
             host_id    TEXT PRIMARY KEY,
-            first_seen INTEGER NOT NULL,
-            last_seen  INTEGER NOT NULL,
+            first_seen BIGINT NOT NULL,
+            last_seen  BIGINT NOT NULL,
             version    TEXT NOT NULL DEFAULT ''
         )",
     )
@@ -31,14 +60,14 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS events (
             id            TEXT PRIMARY KEY,
-            ts            INTEGER NOT NULL,
+            ts            BIGINT NOT NULL,
             host_id       TEXT NOT NULL,
             key           TEXT NOT NULL,
             kind          TEXT NOT NULL,
             severity      TEXT NOT NULL,
             summary       TEXT NOT NULL,
             evidence_json TEXT NOT NULL DEFAULT '[]',
-            created_at    INTEGER NOT NULL -- server ingest time; NEVER used for ordering
+            created_at    BIGINT NOT NULL -- server ingest time; NEVER used for ordering
         )",
     )
     .execute(pool)
@@ -63,10 +92,10 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
             cause      TEXT NOT NULL DEFAULT '',
             actions_json TEXT NOT NULL DEFAULT '[]',
             affected_json TEXT NOT NULL DEFAULT '[]',
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            acked_at   INTEGER,
-            resolved_at INTEGER
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            acked_at   BIGINT,
+            resolved_at BIGINT
         )",
     )
     .execute(pool)
@@ -100,19 +129,29 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         pool,
         "hosts",
         "queue_len",
-        "ALTER TABLE hosts ADD COLUMN queue_len INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE hosts ADD COLUMN queue_len BIGINT NOT NULL DEFAULT 0",
     )
     .await?;
     Ok(())
 }
 
-/// Ensure a column exists (SQLite lacks ADD COLUMN IF NOT EXISTS).
+/// Ensure a column exists. SQLite lacks ADD COLUMN IF NOT EXISTS, so it
+/// walks PRAGMA table_info; postgres has the ANSI form.
 async fn ensure_column(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     table: &str,
     column: &str,
     ddl: &str,
 ) -> Result<(), sqlx::Error> {
+    if is_postgres(pool) {
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} BIGINT NOT NULL DEFAULT 0",
+            table, column
+        ))
+        .execute(pool)
+        .await?;
+        return Ok(());
+    }
     let rows = sqlx::query(&format!("PRAGMA table_info({})", table))
         .fetch_all(pool)
         .await?;
@@ -126,8 +165,9 @@ async fn ensure_column(
 mod tests {
     use super::*;
 
-    async fn test_pool() -> sqlx::SqlitePool {
-        sqlx::sqlite::SqlitePoolOptions::new()
+    async fn test_pool() -> sqlx::AnyPool {
+        ensure_any_drivers();
+        sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await

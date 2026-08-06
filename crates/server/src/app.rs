@@ -15,7 +15,7 @@ use crate::probes::Checker;
 use tower_http::services::ServeDir;
 
 pub struct AppState {
-    pub pool: sqlx::SqlitePool,
+    pub pool: sqlx::AnyPool,
     pub cfg: ServerConfig,
     pub checker: Checker,
     /// Effective correlation rules (config merged over built-in defaults).
@@ -58,7 +58,7 @@ impl Clone for AppState {
 }
 
 impl AppState {
-    pub async fn new(pool: sqlx::SqlitePool, cfg: ServerConfig) -> Self {
+    pub async fn new(pool: sqlx::AnyPool, cfg: ServerConfig) -> Self {
         db::init_schema(&pool).await.expect("schema init failed");
         let rules = merged_rules(&cfg.rules);
         let checker = Checker::new();
@@ -87,7 +87,8 @@ impl AppState {
     /// `#[cfg(test)]` — integration tests (crates/server/tests) compile the
     /// lib without that cfg and need it.
     pub async fn for_tests() -> Self {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        crate::db::ensure_any_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await

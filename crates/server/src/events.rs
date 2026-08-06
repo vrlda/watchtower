@@ -35,19 +35,19 @@ pub async fn list_events(
 }
 
 pub async fn fetch_events(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     q: &EventQuery,
 ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
     let limit = q.limit.clamp(1, 1000);
     let rows = sqlx::query_as::<_, (String, i64, String, String, String, String, String)>(
         "SELECT id, ts, host_id, kind, severity, summary, evidence_json
          FROM events
-         WHERE (?1 IS NULL OR host_id = ?1)
-           AND (?2 IS NULL OR kind = ?2)
-           AND (?3 IS NULL OR severity = ?3)
-           AND (?4 IS NULL OR ts >= ?4)
+         WHERE ($1 IS NULL OR host_id = $1)
+           AND ($2 IS NULL OR kind = $2)
+           AND ($3 IS NULL OR severity = $3)
+           AND ($4 IS NULL OR ts >= $4)
          ORDER BY ts DESC, id
-         LIMIT ?5",
+         LIMIT $5",
     )
     .bind(q.host.as_deref())
     .bind(q.kind.as_deref())
@@ -78,12 +78,12 @@ pub async fn fetch_events(
 
 /// Raw events since `since_ms`, oldest first — used by the correlation scan.
 pub async fn fetch_events_simple(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     since_ms: i64,
 ) -> Result<Vec<wt_common::AgentEvent>, sqlx::Error> {
     let rows = sqlx::query_as::<_, (String, i64, String, String, String, String, String, String)>(
         "SELECT id, ts, host_id, key, kind, severity, summary, evidence_json
-         FROM events WHERE ts >= ?1 ORDER BY ts ASC, id",
+         FROM events WHERE ts >= $1 ORDER BY ts ASC, id",
     )
     .bind(since_ms)
     .fetch_all(pool)
