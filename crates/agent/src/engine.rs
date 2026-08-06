@@ -172,6 +172,10 @@ pub struct AgentState {
     pub error_regexes: Vec<(String, regex::Regex)>,
     /// Per (ident, pattern) line timestamps (ms) for sliding-window counting.
     pub error_counts: HashMap<(String, String), Vec<i64>>,
+    /// Concrete cert paths to scan (glob-expanded at startup).
+    pub cert_paths: Vec<String>,
+    /// Last TLS cert scan time (ms); gates the openssl spawn.
+    pub last_cert_scan: i64,
 }
 
 impl AgentState {
@@ -192,6 +196,12 @@ impl AgentState {
                 .filter_map(|p| regex::Regex::new(p).ok().map(|r| (p.clone(), r)))
                 .collect(),
             error_counts: Default::default(),
+            cert_paths: if cfg.cert_paths.is_empty() {
+                crate::sensors::certs::default_cert_paths()
+            } else {
+                crate::sensors::certs::expand_paths(&cfg.cert_paths)
+            },
+            last_cert_scan: 0,
         }
     }
 
@@ -415,6 +425,19 @@ pub fn run_once(
         }
     }
 
+    // TLS cert sensor — gated by the scan interval (openssl spawn per cert)
+    if ts - state.last_cert_scan >= cfg.cert_scan_interval_secs.max(60) * 1000 {
+        state.last_cert_scan = ts;
+        evs.extend(crate::sensors::certs::scan_certs(
+            &state.cert_paths,
+            cfg,
+            ts / 1000, // unix seconds (the cert math domain)
+            ts,
+            host_id,
+            runners.openssl.as_ref(),
+        ));
+    }
+
     // error-rate spikes: prune windows, emit episodes, reset counters
     if !state.error_regexes.is_empty() {
         let window_ms = cfg.error_window_secs.max(1) * 1000;
@@ -552,6 +575,9 @@ mod tests {
             }),
             Box::new(FakeSys {
                 journal_out: journal_out.to_string(),
+            }),
+            Box::new(FakeSys {
+                journal_out: String::new(),
             }),
             Box::new(FakeSys {
                 journal_out: String::new(),

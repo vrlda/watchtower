@@ -1,3 +1,4 @@
+pub mod certs;
 pub mod docker;
 #[cfg(target_os = "linux")]
 pub mod fim;

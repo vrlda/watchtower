@@ -56,6 +56,7 @@ pub struct Runners {
     pub sys: Box<dyn CommandRunner>,
     pub journal: Box<dyn CommandRunner>,
     pub docker: Box<dyn CommandRunner>,
+    pub openssl: Box<dyn CommandRunner>,
 }
 
 impl Runners {
@@ -64,6 +65,7 @@ impl Runners {
             sys: Box::new(SystemCtl),
             journal: Box::new(JournalCtl),
             docker: Box::new(DockerCli),
+            openssl: Box::new(OpensslCli),
         }
     }
 
@@ -72,11 +74,13 @@ impl Runners {
         sys: Box<dyn CommandRunner>,
         journal: Box<dyn CommandRunner>,
         docker: Box<dyn CommandRunner>,
+        openssl: Box<dyn CommandRunner>,
     ) -> Self {
         Runners {
             sys,
             journal,
             docker,
+            openssl,
         }
     }
 }
@@ -92,6 +96,22 @@ impl CommandRunner for DockerCli {
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(format!("docker exited {}: {}", out.status, stderr.trim()));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+pub struct OpensslCli;
+
+impl CommandRunner for OpensslCli {
+    fn program(&self) -> &'static str {
+        "openssl"
+    }
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let out = run_with_timeout("openssl", args).map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("openssl exited {}: {}", out.status, stderr.trim()));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
