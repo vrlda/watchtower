@@ -74,7 +74,7 @@ sleep 20
 echo "==> polling for the incident"
 for i in $(seq 1 30); do
   INCS=$(curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/incidents" || true)
-  if echo "$INCS" | grep -q '"severity":"Critical"'; then
+  if echo "$INCS" | grep -q 'rule:config_change_outage:demo-host'; then
     echo "$INCS" | head -c 2000
     echo
     echo "DEMO PASSED"
@@ -82,5 +82,5 @@ for i in $(seq 1 30); do
   fi
   sleep 2
 done
-echo "DEMO FAILED: no critical incident" >&2
+echo "DEMO FAILED: no config-change incident" >&2
 exit 1
