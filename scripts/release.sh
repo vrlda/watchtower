@@ -14,7 +14,32 @@ for target in $TARGETS; do
   echo "==> building $target"
   (cd "$ROOT" && cargo build --release --target "$target" -p watchtower-agent -p watchtower-server)
   TARBALL="$DIST/watchtower-$VERSION-$target.tar.gz"
-  tar -C "$ROOT/target/$target/release" -czf "$TARBALL" watchtower-agent watchtower-server
+  mkdir -p "$ROOT/target/$target/release/static"
+  cp -R "$ROOT/crates/server/static/." "$ROOT/target/$target/release/static/"
+  cat > "$ROOT/target/$target/release/watchtower-server.service" <<UNIT
+[Unit]
+Description=Watchtower control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=watchtower
+Group=watchtower
+Environment=WATCHTOWER_UI_DIR=/usr/local/bin/static
+ExecStart=/usr/local/bin/watchtower-server
+Restart=always
+RestartSec=5
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/watchtower
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  tar -C "$ROOT/target/$target/release" -czf "$TARBALL" watchtower-agent watchtower-server static watchtower-server.service
   echo "built $TARBALL"
 done
 

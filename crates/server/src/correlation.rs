@@ -457,8 +457,18 @@ async fn scan_loop(state: crate::app::AppState) {
                 for inc in &changed {
                     eprintln!("incident {}: {} [{}]", inc.id, inc.headline, inc.severity);
                     let json = crate::api_incidents::incident_json(inc);
-                    if state.notify_tx.try_send(json).is_err() {
-                        eprintln!("notify queue full — dropping notification for {}", inc.id);
+                    if let Err(e) = state.notify_tx.try_send(json) {
+                        match e {
+                            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                eprintln!(
+                                    "notify queue full — dropping notification for {}",
+                                    inc.id
+                                );
+                            }
+                            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                                eprintln!("notify channel closed (notifier task died) — dropping notification for {}", inc.id);
+                            }
+                        }
                     }
                 }
             }
