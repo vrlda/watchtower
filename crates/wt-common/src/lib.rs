@@ -42,6 +42,14 @@ pub enum EventKind {
     NewOutboundConnection,
     /// Established-connection rate deviated from the rolling baseline (Warning).
     ConnectionRateSpike,
+    /// A systemd unit transitioned to active (Info — timeline context).
+    /// Emitted by the agent's journald sensor.
+    ServiceRestarted,
+    /// Server-generated: a host's heartbeat stopped arriving within the
+    /// grace period (Critical).
+    AgentHeartbeatMissing,
+    /// Server-generated: a host's telemetry spool queue is growing (Warning).
+    AgentQueueGrowing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,5 +250,17 @@ mod tests {
         assert_eq!(cfg.ssh_brute_threshold, 5);
         assert_eq!(cfg.ssh_brute_window_secs, 300);
         assert!(cfg.watch_paths.is_empty());
+    }
+
+    #[test]
+    fn m4_kinds_serialize() {
+        for (kind, expected) in [
+            (EventKind::ServiceRestarted, "ServiceRestarted"),
+            (EventKind::AgentHeartbeatMissing, "AgentHeartbeatMissing"),
+            (EventKind::AgentQueueGrowing, "AgentQueueGrowing"),
+        ] {
+            let v: serde_json::Value = serde_json::to_value(kind).unwrap();
+            assert_eq!(v, expected);
+        }
     }
 }
