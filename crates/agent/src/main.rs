@@ -90,10 +90,8 @@ fn main() {
             }
         }
         Cmd::Discover => {
-            let discover_procfs = procfs::ProcFs::new(PathBuf::from("/proc"));
-            for check in
-                discover::run_all(&PathBuf::from("/"), runners.sys.as_ref(), &discover_procfs)
-            {
+            let procfs = procfs::ProcFs::new(PathBuf::from("/proc"));
+            for check in discover::run_all(&PathBuf::from("/"), &runners, &procfs) {
                 let mark = if check.ok { "✓" } else { "✗" };
                 println!("{} {} — {}", mark, check.label, check.detail);
             }

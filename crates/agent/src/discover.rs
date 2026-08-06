@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::cmd::CommandRunner;
+use crate::cmd::{CommandRunner, Runners};
 
 /// One checklist item.
 pub struct Check {
@@ -13,11 +13,7 @@ pub struct Check {
 }
 
 /// Run every detection; returns the checklist in display order.
-pub fn run_all(
-    root: &Path,
-    runner: &dyn CommandRunner,
-    procfs: &crate::procfs::ProcFs,
-) -> Vec<Check> {
+pub fn run_all(root: &Path, runners: &Runners, procfs: &crate::procfs::ProcFs) -> Vec<Check> {
     vec![
         Check {
             label: "Host registered",
@@ -51,8 +47,9 @@ pub fn run_all(
         },
         Check {
             label: "Docker detected",
-            ok: detect_docker(runner).is_some(),
-            detail: detect_docker(runner).unwrap_or_else(|| "docker unavailable".into()),
+            ok: detect_docker(runners.docker.as_ref()).is_some(),
+            detail: detect_docker(runners.docker.as_ref())
+                .unwrap_or_else(|| "docker unavailable".into()),
         },
         Check {
             label: "Listening ports",
@@ -234,15 +231,16 @@ pub fn detect_databases(procfs: &crate::procfs::ProcFs) -> Option<String> {
 #[cfg(test)]
 struct FakeRunner {
     out: String,
+    ok_program: &'static str,
 }
 
 #[cfg(test)]
 impl crate::cmd::CommandRunner for FakeRunner {
     fn program(&self) -> &'static str {
-        "systemctl"
+        self.ok_program
     }
     fn run(&self, _args: &[&str]) -> Result<String, String> {
-        if self.out.is_empty() {
+        if self.program() != self.ok_program || self.out.is_empty() {
             Err("exit 1".into())
         } else {
             Ok(self.out.clone())
@@ -306,9 +304,13 @@ mod tests {
     fn systemd_running_via_runner() {
         let runner = FakeRunner {
             out: "running".to_string(),
+            ok_program: "systemctl",
         };
         assert!(detect_systemd(&root(), &runner).is_some());
-        let runner = FakeRunner { out: String::new() };
+        let runner = FakeRunner {
+            out: String::new(),
+            ok_program: "systemctl",
+        };
         assert!(
             detect_systemd(&root(), &runner).is_none(),
             "systemctl failure → not running"
@@ -322,5 +324,41 @@ mod tests {
         );
         assert!(detect_ports(&p).is_some());
         assert!(detect_databases(&p).is_none(), "fixture has no db ports");
+    }
+
+    #[test]
+    fn docker_check_uses_docker_runner() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/discover");
+        let procfs = crate::procfs::ProcFs::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let runners = crate::cmd::Runners::with_fakes(
+            Box::new(FakeRunner {
+                out: "running".into(),
+                ok_program: "systemctl",
+            }),
+            Box::new(FakeRunner {
+                out: String::new(),
+                ok_program: "systemctl",
+            }),
+            Box::new(FakeRunner {
+                out: "x".into(),
+                ok_program: "docker",
+            }),
+            Box::new(FakeRunner {
+                out: String::new(),
+                ok_program: "openssl",
+            }),
+        );
+        let checks = run_all(&root, &runners, &procfs);
+        let docker = checks
+            .iter()
+            .find(|c| c.label == "Docker detected")
+            .unwrap();
+        assert!(
+            docker.ok,
+            "docker check must use the docker runner: {}",
+            docker.detail
+        );
     }
 }

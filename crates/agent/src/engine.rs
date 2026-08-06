@@ -831,11 +831,11 @@ mod tests {
     }
 
     #[test]
-    fn reboot_detector_ignores_clock_steps() {
+    fn reboot_detector_ignores_subthreshold_steps() {
         // clock steps move now and boot together → no false reboot
         let mut d = RebootDetector::default();
         d.observe(1_000_000_000, 0);
-        assert!(!d.observe(1_000_000_100, 1000).0); // +100s clock step, same uptime
+        assert!(!d.observe(1_000_000_100, 1000).0); // +0.1s step — sub-threshold, no fire
     }
 
     #[test]
