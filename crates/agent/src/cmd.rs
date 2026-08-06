@@ -50,6 +50,54 @@ impl CommandRunner for JournalCtl {
     }
 }
 
+/// The external programs the agent spawns, bundled so `run_once` takes one
+/// parameter instead of growing args.
+pub struct Runners {
+    pub sys: Box<dyn CommandRunner>,
+    pub journal: Box<dyn CommandRunner>,
+    #[allow(dead_code)] // wired in Task 5 (docker sensor)
+    pub docker: Box<dyn CommandRunner>,
+}
+
+impl Runners {
+    pub fn real() -> Self {
+        Runners {
+            sys: Box::new(SystemCtl),
+            journal: Box::new(JournalCtl),
+            docker: Box::new(DockerCli),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_fakes(
+        sys: Box<dyn CommandRunner>,
+        journal: Box<dyn CommandRunner>,
+        docker: Box<dyn CommandRunner>,
+    ) -> Self {
+        Runners {
+            sys,
+            journal,
+            docker,
+        }
+    }
+}
+
+pub struct DockerCli;
+
+impl CommandRunner for DockerCli {
+    fn program(&self) -> &'static str {
+        "docker"
+    }
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let out = run_with_timeout("docker", args).map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("docker exited {}: {}", out.status, stderr.trim()));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
 /// Spawn `program` with stdout/stderr captured and kill it after TIMEOUT.
 /// Reader threads drain the pipes so a verbose child cannot deadlock us.
 fn run_with_timeout(program: &str, args: &[&str]) -> Result<Output, String> {

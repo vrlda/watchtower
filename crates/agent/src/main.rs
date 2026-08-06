@@ -56,8 +56,7 @@ fn main() {
     let cfg = load_config(&cli.config);
     let host_id = resolve_host_id(&cfg);
     let procfs = procfs::ProcFs::new(PathBuf::from("/proc"));
-    let sys = cmd::SystemCtl;
-    let journal = cmd::JournalCtl;
+    let runners = cmd::Runners::real();
     let spool = telemetry::Spool::new(PathBuf::from(&cfg.spool_dir));
 
     match cli.cmd {
@@ -73,8 +72,7 @@ fn main() {
                 &host_id,
                 now_ms(),
                 &procfs,
-                &sys,
-                &journal,
+                &runners,
                 &mut state,
             );
             for ev in &evs {
@@ -119,8 +117,7 @@ fn main() {
                     &host_id,
                     now_ms(),
                     &procfs,
-                    &sys,
-                    &journal,
+                    &runners,
                     &mut state,
                 );
                 if !evs.is_empty() && !cfg.server_url.is_empty() {

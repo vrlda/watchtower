@@ -201,17 +201,13 @@ impl AgentState {
 
 /// One detection pass: run all sensors against current state, apply dedup,
 /// return events to ship. Called every poll interval and by `check`.
-/// `sys` runs systemctl; `journal` runs journalctl (each CommandRunner impl
-/// has its program baked in).
-#[allow(clippy::too_many_arguments)] // sensor-bundling refactor deferred; 8 params accepted
 pub fn run_once(
     cfg: &Config,
     deduper: &mut Deduper,
     host_id: &str,
     ts: i64,
     procfs: &crate::procfs::ProcFs,
-    sys: &dyn crate::cmd::CommandRunner,
-    journal: &dyn crate::cmd::CommandRunner,
+    runners: &crate::cmd::Runners,
     state: &mut AgentState,
 ) -> Vec<AgentEvent> {
     let mut evs = Vec::new();
@@ -262,7 +258,7 @@ pub fn run_once(
     }
 
     // systemd sensor
-    if let Ok(states) = crate::sensors::systemd::systemctl_list_units(sys) {
+    if let Ok(states) = crate::sensors::systemd::systemctl_list_units(runners.sys.as_ref()) {
         for (unit, unit_state) in states {
             state
                 .crash
@@ -272,7 +268,7 @@ pub fn run_once(
 
     // ssh/auth sensor (journald)
     let since_ms = state.journal_since_ms;
-    if let Ok(lines) = crate::journald::read_since(journal, since_ms / 1000, 0) {
+    if let Ok(lines) = crate::journald::read_since(runners.journal.as_ref(), since_ms / 1000, 0) {
         for line in &lines {
             // ms cursor: a line at or before the cursor was already processed.
             // Skipping <= (not <) means a line at exactly the cursor ms is not
@@ -535,25 +531,28 @@ mod tests {
         )
     }
 
+    fn runners_with(journal_out: &str) -> crate::cmd::Runners {
+        crate::cmd::Runners::with_fakes(
+            Box::new(FakeSys {
+                journal_out: String::new(),
+            }),
+            Box::new(FakeSys {
+                journal_out: journal_out.to_string(),
+            }),
+            Box::new(FakeSys {
+                journal_out: String::new(),
+            }),
+        )
+    }
+
     #[test]
     fn run_once_wires_sensors_and_emits_events() {
         let cfg = Config::default();
         let mut deduper = Deduper::new(300);
         let mut state = AgentState::for_tests();
         let p = fixture_procfs();
-        let runner = FakeSys {
-            journal_out: "".to_string(),
-        };
-        let evs = run_once(
-            &cfg,
-            &mut deduper,
-            "h-1",
-            1000,
-            &p,
-            &runner,
-            &runner,
-            &mut state,
-        );
+        let runners = runners_with("");
+        let evs = run_once(&cfg, &mut deduper, "h-1", 1000, &p, &runners, &mut state);
         assert!(!evs.is_empty());
         assert!(evs.iter().any(|e| e.kind == EventKind::SwapHigh));
     }
@@ -568,18 +567,16 @@ mod tests {
         let mut deduper = Deduper::new(300);
         let mut state = AgentState::new(&cfg, "h-1");
         let p = fixture_procfs();
-        let runner = FakeSys {
-            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40000 ssh2"}
-{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40001 ssh2"}"#.to_string(),
-        };
+        let journal_out = r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40000 ssh2"}
+{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40001 ssh2"}"#;
+        let runners = runners_with(journal_out);
         let evs = run_once(
             &cfg,
             &mut deduper,
             "h-1",
             1_758_000_002_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         assert!(evs.iter().any(|e| e.kind == EventKind::SshBruteForce));
@@ -601,9 +598,9 @@ mod tests {
     #[test]
     fn run_once_journal_cursor_advances_beyond_max_line() {
         let mut state = AgentState::for_tests();
-        let runner = FakeSys {
-            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted publickey for deploy from 198.51.100.24 port 51234 ssh2"}"#.to_string(),
-        };
+        let runners = runners_with(
+            r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted publickey for deploy from 198.51.100.24 port 51234 ssh2"}"#,
+        );
         let cfg = Config::default();
         let mut deduper = Deduper::new(300);
         let p = fixture_procfs();
@@ -613,8 +610,7 @@ mod tests {
             "h-1",
             1_758_000_002_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         assert!(evs.iter().any(|e| e.kind == EventKind::SshLogin));
@@ -627,8 +623,7 @@ mod tests {
             "h-1",
             1_758_000_004_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         assert!(!evs.iter().any(|e| e.kind == EventKind::SshLogin));
@@ -645,9 +640,9 @@ mod tests {
         let mut deduper = Deduper::new(300);
         let mut state = AgentState::new(&cfg, "h-1");
         let p = fixture_procfs();
-        let runner = FakeSys {
-            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40000 ssh2"}"#.to_string(),
-        };
+        let runners = runners_with(
+            r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40000 ssh2"}"#,
+        );
         // poll 1: 1 failure counted, no episode (threshold 2)
         let evs = run_once(
             &cfg,
@@ -655,8 +650,7 @@ mod tests {
             "h-1",
             1_758_000_002_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         assert!(!evs.iter().any(|e| e.kind == EventKind::SshBruteForce));
@@ -669,8 +663,7 @@ mod tests {
                 "h-1",
                 1_758_000_004_000,
                 &p,
-                &runner,
-                &runner,
+                &runners,
                 &mut state,
             );
             assert!(
@@ -683,10 +676,10 @@ mod tests {
     #[test]
     fn run_once_emits_sudo_and_root_login() {
         let mut state = AgentState::for_tests();
-        let runner = FakeSys {
-            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sudo","MESSAGE":"deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/systemctl restart nginx"}
-{"__REALTIME_TIMESTAMP":"1758000000500000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted password for root from 198.51.100.24 port 51235 ssh2"}"#.to_string(),
-        };
+        let runners = runners_with(
+            r#"{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sudo","MESSAGE":"deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/systemctl restart nginx"}
+{"__REALTIME_TIMESTAMP":"1758000000500000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted password for root from 198.51.100.24 port 51235 ssh2"}"#,
+        );
         let cfg = Config::default();
         let mut deduper = Deduper::new(300);
         let p = fixture_procfs();
@@ -696,8 +689,7 @@ mod tests {
             "h-1",
             1_758_000_002_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         assert!(evs.iter().any(|e| e.kind == EventKind::SudoUsed));
@@ -710,9 +702,9 @@ mod tests {
     #[test]
     fn local_sudo_does_not_escalate_on_first_use() {
         let mut state = AgentState::for_tests();
-        let runner = FakeSys {
-            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sudo","MESSAGE":"deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/systemctl restart nginx"}"#.to_string(),
-        };
+        let runners = runners_with(
+            r#"{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sudo","MESSAGE":"deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/systemctl restart nginx"}"#,
+        );
         let cfg = Config::default();
         let mut deduper = Deduper::new(300);
         let p = crate::procfs::ProcFs::new(
@@ -724,8 +716,7 @@ mod tests {
             "h-1",
             1_758_000_002_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         let sudo = evs.iter().find(|e| e.kind == EventKind::SudoUsed).unwrap();
@@ -735,9 +726,9 @@ mod tests {
     #[test]
     fn run_once_emits_service_restarted() {
         let mut state = AgentState::for_tests();
-        let runner = FakeSys {
-            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000011000000","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"Started myapp.service."}"#.to_string(),
-        };
+        let runners = runners_with(
+            r#"{"__REALTIME_TIMESTAMP":"1758000011000000","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"Started myapp.service."}"#,
+        );
         let cfg = Config::default();
         let mut deduper = Deduper::new(300);
         let p = crate::procfs::ProcFs::new(
@@ -749,8 +740,7 @@ mod tests {
             "h-1",
             1_758_000_011_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         let ev = evs
@@ -802,9 +792,7 @@ mod tests {
             r#"{"__REALTIME_TIMESTAMP":"1758000011000000","SYSLOG_IDENTIFIER":"myapp","MESSAGE":"another ERROR occurred"}"#,
             r#"{"__REALTIME_TIMESTAMP":"1758000012000000","SYSLOG_IDENTIFIER":"myapp","MESSAGE":"Traceback (most recent call last)"}"#,
         ];
-        let runner = FakeSys {
-            journal_out: lines.join("\n"),
-        };
+        let runners = runners_with(&lines.join("\n"));
         let mut deduper = Deduper::new(300);
         let evs = run_once(
             &cfg,
@@ -812,8 +800,7 @@ mod tests {
             "h-1",
             1_758_000_013_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         // per-pattern counts: ERROR=2, Traceback=1 — neither crosses 3
@@ -823,15 +810,14 @@ mod tests {
             .map(|i| format!(r#"{{"__REALTIME_TIMESTAMP":"{}","SYSLOG_IDENTIFIER":"myapp","MESSAGE":"ERROR in request {}"}}"#, 1_758_000_020_000_000_i64 + (i as i64) * 100_000, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let runner = FakeSys { journal_out: flood };
+        let runners = runners_with(&flood);
         let evs = run_once(
             &cfg,
             &mut deduper,
             "h-1",
             1_758_000_021_000,
             &p,
-            &runner,
-            &runner,
+            &runners,
             &mut state,
         );
         let spike = evs.iter().find(|e| e.kind == EventKind::ErrorRateSpike);
