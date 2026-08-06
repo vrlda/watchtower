@@ -10,6 +10,7 @@ clap = { version = "4", features = ["derive"] }
 ureq = { version = "2", features = ["tls"] }
 toml = "0.8"
 libc = "0.2"
+regex = "1"
 wt-common = { path = "../wt-common" }
 
 [target.'cfg(target_os = "linux")'.dependencies]

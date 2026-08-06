@@ -167,6 +167,10 @@ pub struct AgentState {
     pub journal_since_ms: i64,
     /// FIM watcher channel (None when no files are watched).
     pub fim_rx: Option<Receiver<FimEvent>>,
+    /// Compiled error patterns; empty when no error patterns are configured.
+    pub error_regexes: Vec<(String, regex::Regex)>,
+    /// Per (ident, pattern) line timestamps (ms) for sliding-window counting.
+    pub error_counts: HashMap<(String, String), Vec<i64>>,
 }
 
 impl AgentState {
@@ -180,6 +184,12 @@ impl AgentState {
             reboot: RebootDetector::default(),
             journal_since_ms: 0,
             fim_rx: None,
+            error_regexes: cfg
+                .error_patterns
+                .iter()
+                .filter_map(|p| regex::Regex::new(p).ok().map(|r| (p.clone(), r)))
+                .collect(),
+            error_counts: Default::default(),
         }
     }
 
@@ -378,11 +388,58 @@ pub fn run_once(
                     }],
                 });
             }
+            if !state.error_regexes.is_empty() {
+                for (pat, re) in &state.error_regexes {
+                    if re.is_match(&line.message) {
+                        state
+                            .error_counts
+                            .entry((line.ident.clone(), pat.clone()))
+                            .or_default()
+                            .push(line.ts_ms);
+                    }
+                }
+            }
         }
     }
 
     // netflow sensor
     evs.extend(state.net.observe(procfs, ts, host_id));
+
+    // error-rate spikes: prune windows, emit episodes, reset counters
+    if !state.error_regexes.is_empty() {
+        let window_ms = cfg.error_window_secs.max(1) * 1000;
+        let mut fired = Vec::new();
+        for ((ident, pat), list) in state.error_counts.iter_mut() {
+            list.retain(|t| *t + window_ms >= ts);
+            if list.len() >= cfg.error_threshold as usize {
+                let count = list.len();
+                fired.push((ident.clone(), pat.clone(), count));
+            }
+        }
+        for (ident, pat, count) in fired {
+            state.error_counts.remove(&(ident.clone(), pat.clone()));
+            evs.push(AgentEvent {
+                id: format!("err-{}-{}-{}", ts, ident, pat),
+                ts,
+                host_id: host_id.into(),
+                key: format!("errrate:{}:{}", ident, pat),
+                kind: EventKind::ErrorRateSpike,
+                severity: Severity::Warning,
+                summary: format!(
+                    "{} error pattern \"{}\" hit {} times in {}s",
+                    ident, pat, count, cfg.error_window_secs
+                ),
+                evidence: vec![Evidence {
+                    ts,
+                    source: "journald".into(),
+                    detail: format!(
+                        "Ident={} Pattern={} Count={} WindowSecs={}",
+                        ident, pat, count, cfg.error_window_secs
+                    ),
+                }],
+            });
+        }
+    }
 
     // FIM channel drain
     if let Some(rx) = &state.fim_rx {
@@ -726,6 +783,65 @@ mod tests {
         let mut d = RebootDetector::default();
         d.observe(1_000_000_000, 0);
         assert!(!d.observe(1_000_000_100, 1000).0); // +100s clock step, same uptime
+    }
+
+    #[test]
+    fn error_counts_window_and_emits_spike_at_threshold() {
+        let cfg = Config {
+            error_patterns: vec!["ERROR".to_string(), "Traceback".to_string()],
+            error_threshold: 3,
+            error_window_secs: 300,
+            ..Default::default()
+        };
+        let mut state = AgentState::new(&cfg, "h-1");
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let lines = [
+            r#"{"__REALTIME_TIMESTAMP":"1758000010000000","SYSLOG_IDENTIFIER":"myapp","MESSAGE":"request failed with ERROR 500"}"#,
+            r#"{"__REALTIME_TIMESTAMP":"1758000011000000","SYSLOG_IDENTIFIER":"myapp","MESSAGE":"another ERROR occurred"}"#,
+            r#"{"__REALTIME_TIMESTAMP":"1758000012000000","SYSLOG_IDENTIFIER":"myapp","MESSAGE":"Traceback (most recent call last)"}"#,
+        ];
+        let runner = FakeSys {
+            journal_out: lines.join("\n"),
+        };
+        let mut deduper = Deduper::new(300);
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_013_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        // per-pattern counts: ERROR=2, Traceback=1 — neither crosses 3
+        assert!(evs.iter().all(|e| e.kind != EventKind::ErrorRateSpike));
+        // flood one pattern past the threshold in a second poll
+        let flood = (0..4)
+            .map(|i| format!(r#"{{"__REALTIME_TIMESTAMP":"{}","SYSLOG_IDENTIFIER":"myapp","MESSAGE":"ERROR in request {}"}}"#, 1_758_000_020_000_000_i64 + (i as i64) * 100_000, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let runner = FakeSys { journal_out: flood };
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_021_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        let spike = evs.iter().find(|e| e.kind == EventKind::ErrorRateSpike);
+        assert!(
+            spike.is_some(),
+            "threshold crossed must emit, got {:?}",
+            evs.iter().map(|e| e.kind).collect::<Vec<_>>()
+        );
+        assert_eq!(spike.unwrap().severity, wt_common::Severity::Warning);
+        assert!(spike.unwrap().summary.contains("ERROR"));
     }
 
     struct FakeSys {
