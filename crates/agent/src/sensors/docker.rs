@@ -25,6 +25,7 @@ pub struct ContainerState {
     pub name: String,
     pub image: String,
     pub state: String,
+    pub status: String,
 }
 
 /// Parse `docker ps --format '{{json .}}'` output: one JSON object per line.
@@ -40,9 +41,17 @@ pub fn parse_docker_ps(out: &str) -> Result<Vec<ContainerState>, String> {
             name: v.names,
             image: v.image,
             state: v.state,
+            status: v.status,
         });
     }
     Ok(containers)
+}
+
+/// "Restarting (4) 1 second ago" → 4; anything else → None.
+fn restart_count(status: &str) -> Option<u32> {
+    let rest = status.strip_prefix("Restarting (")?;
+    let n = rest.split(')').next()?;
+    n.trim().parse().ok()
 }
 
 /// Per-container transition tracker: running→exited = stopped (Warning);
@@ -52,6 +61,7 @@ pub fn parse_docker_ps(out: &str) -> Result<Vec<ContainerState>, String> {
 pub struct ContainerTracker {
     prev: HashMap<String, String>,
     restarting_count: HashMap<String, u32>,
+    prev_restart_n: HashMap<String, u32>,
 }
 
 impl ContainerTracker {
@@ -106,12 +116,44 @@ impl ContainerTracker {
                     });
                     self.restarting_count.remove(&c.name); // episode resets
                 }
-            } else {
+            }
+            // fast crash loops: the Status "Restarting (N)" counter climbs
+            // even when the sampled state is "running" between attempts
+            if let Some(n) = restart_count(&c.status) {
+                let prev_n = self.prev_restart_n.entry(c.name.clone()).or_insert(0);
+                let delta = n.saturating_sub(*prev_n);
+                *prev_n = n;
+                if delta > 0 {
+                    let restarts = self.restarting_count.entry(c.name.clone()).or_insert(0);
+                    *restarts = restarts.saturating_add(delta);
+                    if *restarts >= 3 {
+                        evs.push(AgentEvent {
+                            id: format!("dloop-{}-{}", c.name, ts),
+                            ts,
+                            host_id: host_id.into(),
+                            key: format!("docker:{}", c.name),
+                            kind: EventKind::ContainerCrashLoop,
+                            severity: Severity::Critical,
+                            summary: format!("container {} is crash-looping", c.name),
+                            evidence: vec![Evidence {
+                                ts,
+                                source: "docker".into(),
+                                detail: format!("Container={} RestartCount={}", c.name, *restarts),
+                            }],
+                        });
+                        self.restarting_count.remove(&c.name);
+                        self.prev_restart_n.remove(&c.name);
+                    }
+                }
+            } else if c.state != "restarting" {
+                // stable status (e.g. "Up ...") resets the counters
                 self.restarting_count.remove(&c.name);
+                self.prev_restart_n.remove(&c.name);
             }
         }
         // containers that vanished entirely (removed) — stop tracking
         self.prev.retain(|name, _| seen.contains(name));
+        self.prev_restart_n.retain(|name, _| seen.contains(name));
     }
 }
 
@@ -183,11 +225,98 @@ mod tests {
     }
 
     fn container(name: &str, state: &str) -> ContainerState {
+        container_status(name, state, "Up 1 second")
+    }
+
+    fn container_status(name: &str, state: &str, status: &str) -> ContainerState {
         ContainerState {
             id: format!("id-{}", name),
             name: name.to_string(),
             image: String::new(),
             state: state.to_string(),
+            status: status.to_string(),
         }
+    }
+
+    #[test]
+    fn restart_counter_jumps_detect_fast_crash_loops() {
+        // a sub-poll crash loop mostly samples "running" but the Status
+        // counter climbs — the N jumps must accumulate into a crash loop
+        let mut t = ContainerTracker::default();
+        let mut evs = Vec::new();
+        t.observe(
+            &[container_status(
+                "web",
+                "running",
+                "Restarting (1) 1 second ago",
+            )],
+            1000,
+            "h-1",
+            &mut evs,
+        );
+        t.observe(
+            &[container_status(
+                "web",
+                "running",
+                "Restarting (2) 1 second ago",
+            )],
+            2000,
+            "h-1",
+            &mut evs,
+        );
+        assert!(
+            evs.is_empty(),
+            "deltas 1+1 = 2 restarts, under the threshold"
+        );
+        t.observe(
+            &[container_status(
+                "web",
+                "running",
+                "Restarting (3) 1 second ago",
+            )],
+            3000,
+            "h-1",
+            &mut evs,
+        );
+        let loop_ev = evs.iter().find(|e| e.kind == EventKind::ContainerCrashLoop);
+        assert!(loop_ev.is_some(), "N jumps 1→2→3 = 3 restarts ≥ 3");
+    }
+
+    #[test]
+    fn restart_counter_resets_on_stable_status() {
+        let mut t = ContainerTracker::default();
+        let mut evs = Vec::new();
+        t.observe(
+            &[container_status(
+                "web",
+                "running",
+                "Restarting (2) 1 second ago",
+            )],
+            1000,
+            "h-1",
+            &mut evs,
+        );
+        t.observe(
+            &[container_status("web", "running", "Up 2 hours")],
+            2000,
+            "h-1",
+            &mut evs,
+        );
+        assert!(evs.is_empty(), "seeding + stable status emit nothing");
+        // a FRESH restart counter (post-reset) with N ≥ 3 is a crash loop
+        t.observe(
+            &[container_status(
+                "web",
+                "running",
+                "Restarting (8) 1 second ago",
+            )],
+            3000,
+            "h-1",
+            &mut evs,
+        );
+        assert!(
+            evs.iter().any(|e| e.kind == EventKind::ContainerCrashLoop),
+            "8 restarts is a crash loop"
+        );
     }
 }

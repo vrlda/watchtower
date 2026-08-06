@@ -952,6 +952,7 @@ mod tests {
                 name: "web".into(),
                 image: "x".into(),
                 state: "running".into(),
+                status: "Up 1 second".into(),
             }],
             1_000,
             "h-1",
