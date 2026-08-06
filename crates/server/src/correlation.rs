@@ -234,6 +234,56 @@ pub fn assemble(rule: &Rule, m: &RuleMatch, host: &str) -> IncidentDraft {
     }
 }
 
+/// Multi-host match: HostUnreachable events from >= 2 DISTINCT hosts within
+/// the shared window. Runs BEFORE the per-host rule pass so the events are
+/// claimed here (one incident, not N+1).
+pub fn multi_host_match(
+    by_host: &std::collections::HashMap<String, Vec<AgentEvent>>,
+    now: i64,
+    exclude: &std::collections::HashSet<String>,
+) -> Option<(Vec<AgentEvent>, usize)> {
+    let window_start = now - 300_000; // shared 300s window
+    let mut events = Vec::new();
+    let mut hosts = std::collections::HashSet::new();
+    for (host, host_events) in by_host {
+        for e in host_events {
+            if e.kind == EventKind::HostUnreachable
+                && !exclude.contains(&e.id)
+                && e.ts >= window_start
+                && e.ts <= now
+            {
+                events.push(e.clone());
+                hosts.insert(host.clone());
+            }
+        }
+    }
+    if hosts.len() >= 2 {
+        Some((events, hosts.len()))
+    } else {
+        None
+    }
+}
+
+/// Assemble the multi-host incident draft. Host-independent key (no template
+/// filling — severity/cause/actions are fixed).
+pub fn assemble_multi_host(events: Vec<AgentEvent>, host_count: usize) -> IncidentDraft {
+    IncidentDraft {
+        key: "rule:multi_host_outage:multi".into(),
+        host_id: "multi".into(),
+        severity: "Critical".into(),
+        headline: format!("{} hosts unreachable", host_count),
+        cause: "External probes failed for multiple hosts within the window.".into(),
+        actions: vec!["Check the upstream network and provider status".into()],
+        affected: {
+            let mut v: Vec<String> = events.iter().map(|e| e.host_id.clone()).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        },
+        events,
+    }
+}
+
 /// An incident about to be persisted.
 #[derive(Debug)]
 pub struct IncidentDraft {
@@ -301,14 +351,48 @@ pub async fn scan_and_absorb(
     }
     let mut changed = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
+    // shared across hosts: the multi-host pass claims events FIRST so the
+    // per-host rule pass can't double-fire on the same unreachables
+    let mut matched_event_ids: std::collections::HashSet<String> = Default::default();
     let fallback_cooldown = rules
         .iter()
         .find(|r| r.is_fallback)
         .map(|r| r.cooldown_secs * 1000)
         .unwrap_or(300_000);
 
+    // multi-host pass: >=2 hosts unreachable in the shared window → one
+    // incident (not N+1); the per-host loop below skips claimed events
+    if let Some((mh_events, host_count)) = multi_host_match(&by_host, now, &matched_event_ids) {
+        let draft = assemble_multi_host(mh_events, host_count);
+        // claim first: cooldown-suppressed events must not re-open as
+        // per-host or fallback incidents (same convention as the rule pass)
+        for e in &draft.events {
+            matched_event_ids.insert(e.id.clone());
+        }
+        if !recently_resolved(pool, &draft.key, now, 600_000).await? {
+            let inc = incidents::create_incident(
+                pool,
+                &draft.key,
+                &draft.host_id,
+                &draft.severity,
+                &draft.headline,
+                &draft.cause,
+                &draft.actions,
+                &draft.affected,
+            )
+            .await?;
+            let new_links = incidents::link_events(pool, &inc.id, &draft.events).await?;
+            if new_links > 0 {
+                incidents::touch_incident(pool, &inc.id).await?;
+                let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
+                if seen.insert(inc.id.clone()) {
+                    changed.push(inc);
+                }
+            }
+        }
+    }
+
     for (host, host_events) in by_host {
-        let mut matched_event_ids: std::collections::HashSet<String> = Default::default();
         // rule pass (declared order; earlier rules claim events first)
         for rule in rules {
             if rule.is_fallback {
@@ -515,10 +599,21 @@ mod tests {
     use wt_common::{AgentEvent, EventKind, Severity};
 
     fn ev(id: &str, ts: i64, kind: EventKind, sev: Severity, key: &str) -> AgentEvent {
+        ev_host("h-1", id, ts, kind, sev, key)
+    }
+
+    fn ev_host(
+        host: &str,
+        id: &str,
+        ts: i64,
+        kind: EventKind,
+        sev: Severity,
+        key: &str,
+    ) -> AgentEvent {
         AgentEvent {
             id: id.into(),
             ts,
-            host_id: "h-1".into(),
+            host_id: host.into(),
             key: key.into(),
             kind,
             severity: sev,
@@ -1158,5 +1253,63 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
             assert_eq!(drafts.len(), 1, "{:?} must incident via fallback", kind);
             assert_eq!(drafts[0].severity, "Critical");
         }
+    }
+
+    #[tokio::test]
+    async fn multi_host_outage_one_incident_for_two_hosts() {
+        let p = pool().await;
+        let events = vec![
+            ev_host(
+                "mh-1",
+                "mh-1",
+                999_999_800_000,
+                EventKind::HostUnreachable,
+                Severity::Critical,
+                "uptime:https://a",
+            ),
+            ev_host(
+                "mh-2",
+                "mh-2",
+                999_999_820_000,
+                EventKind::HostUnreachable,
+                Severity::Critical,
+                "uptime:https://b",
+            ),
+        ];
+        crate::ingest::store_events(&p, &events).await.unwrap();
+        let rules = default_rules();
+        let changed = scan_and_absorb(&p, &rules, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            changed.len(),
+            1,
+            "one multi-host incident, no per-host incidents"
+        );
+        assert!(changed[0].key.starts_with("rule:multi_host_outage"));
+        assert!(changed[0].headline.contains("2 hosts"));
+        assert!(changed[0].timeline.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn single_host_unreachable_uses_per_host_rule() {
+        let p = pool().await;
+        let events = vec![ev(
+            "s-1",
+            999_999_800_000,
+            EventKind::HostUnreachable,
+            Severity::Critical,
+            "uptime:https://a",
+        )];
+        crate::ingest::store_events(&p, &events).await.unwrap();
+        let rules = default_rules();
+        let changed = scan_and_absorb(&p, &rules, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(changed.len(), 1);
+        assert!(
+            changed[0].key.starts_with("rule:server_unreachable"),
+            "single host stays per-host"
+        );
     }
 }
