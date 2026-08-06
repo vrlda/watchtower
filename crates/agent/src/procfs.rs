@@ -159,6 +159,12 @@ impl ProcFs {
         field.parse::<f64>().map_err(|e| e.to_string())
     }
 
+    /// /proc/sys/kernel/random/boot_id — changes on every boot.
+    pub fn boot_id(&self) -> Result<String, String> {
+        let text = self.read("sys/kernel/random/boot_id")?;
+        Ok(text.trim().to_string())
+    }
+
     pub fn netdev_errors(&self) -> Result<HashMap<String, NetDevErrors>, String> {
         let text = self.read("net/dev")?;
         let mut out = HashMap::new();
@@ -259,6 +265,13 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| e.local_ip == "::" && e.local_port == 9000 && e.state == "ESTABLISHED"));
+    }
+
+    #[test]
+    fn reads_boot_id() {
+        let p = ProcFs::new(test_base());
+        let id = p.boot_id().unwrap();
+        assert!(id.contains('-'), "uuid-shaped: {}", id);
     }
 
     #[test]

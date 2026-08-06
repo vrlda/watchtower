@@ -79,22 +79,32 @@ impl Deduper {
     }
 }
 
-/// Detects boot-epoch changes (uptime resets) between polls. A reboot resets
-/// uptime, moving boot far earlier; the 60s threshold absorbs clock jitter
-/// and small NTP steps.
+/// Detects boot-epoch changes (uptime resets) between polls. A reboot fires
+/// only when BOTH the boot epoch jumped (>60s) AND the kernel boot id
+/// changed (clock steps and VM suspension move the epoch alone; a real
+/// reboot changes both). When the boot id is unreadable, the epoch
+/// heuristic alone decides.
 #[derive(Default)]
 pub struct RebootDetector {
     boot_epoch: Option<i64>,
+    boot_id: Option<String>,
 }
 
 impl RebootDetector {
-    /// Returns (reboot_fired, boot_epoch). Threshold: >60s epoch jump.
-    pub fn observe(&mut self, boot: i64, _ts_ms: i64) -> (bool, i64) {
-        let fired = match self.boot_epoch {
-            Some(prev) => (boot - prev).abs() > 60_000, // 60s, ms units
+    pub fn observe(&mut self, boot: i64, id: Option<String>, _ts_ms: i64) -> (bool, i64) {
+        let epoch_jumped = match self.boot_epoch {
+            Some(prev) => (boot - prev).abs() > 60_000,
             None => false,
         };
+        let id_changed = match (&self.boot_id, &id) {
+            (Some(prev), Some(cur)) => prev != cur,
+            _ => true, // unavailable → don't block the epoch signal
+        };
+        let fired = epoch_jumped && id_changed;
         self.boot_epoch = Some(boot);
+        if id.is_some() {
+            self.boot_id = id;
+        }
         (fired, boot)
     }
 }
@@ -255,7 +265,8 @@ pub fn run_once(
     // reboot sensor: boot epoch = now - uptime; uptime resets = reboot
     if let Ok(uptime) = procfs.uptime_secs() {
         if let Some(boot) = boot_epoch(ts, uptime) {
-            let (fired, boot) = state.reboot.observe(boot, ts);
+            let id = procfs.boot_id().ok();
+            let (fired, boot) = state.reboot.observe(boot, id, ts);
             if fired {
                 evs.push(AgentEvent {
                     id: format!("reboot-{}", ts),
@@ -264,7 +275,7 @@ pub fn run_once(
                     key: "system:reboot".into(),
                     kind: EventKind::Reboot,
                     severity: Severity::Warning,
-                    summary: "system rebooted (uptime reset)".into(),
+                    summary: "system rebooted (uptime and boot id reset)".into(),
                     evidence: vec![Evidence {
                         ts,
                         source: "procfs".into(),
@@ -823,10 +834,10 @@ mod tests {
     #[test]
     fn reboot_detector_fires_on_epoch_jump() {
         let mut d = RebootDetector::default();
-        assert!(!d.observe(1_000_000_000, 0).0, "seed only");
-        let (fired, _) = d.observe(999_996_400_000, 1000);
+        assert!(!d.observe(1_000_000_000, None, 0).0, "seed only");
+        let (fired, _) = d.observe(999_996_400_000, None, 1000);
         assert!(fired);
-        let (fired, _) = d.observe(999_996_400_010, 1010);
+        let (fired, _) = d.observe(999_996_400_010, None, 1010);
         assert!(!fired, "stable after jump");
     }
 
@@ -834,8 +845,42 @@ mod tests {
     fn reboot_detector_ignores_subthreshold_steps() {
         // clock steps move now and boot together → no false reboot
         let mut d = RebootDetector::default();
-        d.observe(1_000_000_000, 0);
-        assert!(!d.observe(1_000_000_100, 1000).0); // +0.1s step — sub-threshold, no fire
+        d.observe(1_000_000_000, None, 0);
+        assert!(!d.observe(1_000_000_100, None, 1000).0); // +0.1s step — sub-threshold, no fire
+    }
+
+    #[test]
+    fn reboot_requires_both_epoch_jump_and_boot_id_change() {
+        let mut d = RebootDetector::default();
+        assert!(!d.observe(1_000_000_000, Some("id-1".to_string()), 0).0);
+        assert!(
+            !d.observe(999_996_400_000, Some("id-1".to_string()), 1000).0,
+            "clock step must not fire"
+        );
+        assert!(
+            d.observe(1_000_000_100, Some("id-2".to_string()), 2000).0,
+            "real reboot: fresh epoch and new id"
+        );
+    }
+
+    #[test]
+    fn reboot_falls_back_to_epoch_only_without_boot_id() {
+        let mut d = RebootDetector::default();
+        assert!(!d.observe(1_000_000_000, None, 0).0);
+        assert!(
+            d.observe(999_996_400_000, None, 1000).0,
+            "no boot id → epoch heuristic only"
+        );
+    }
+
+    #[test]
+    fn boot_id_change_alone_does_not_fire() {
+        let mut d = RebootDetector::default();
+        assert!(!d.observe(1_000_000_000, Some("id-1".into()), 0).0);
+        assert!(
+            !d.observe(1_000_000_100, Some("id-2".into()), 1000).0,
+            "id changed but epoch stable"
+        );
     }
 
     #[test]

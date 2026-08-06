@@ -171,8 +171,8 @@ pub async fn notify_incident(
 }
 
 /// In-memory retry queue: (url, payload, attempts). try_take POPS; retry()
-/// re-queues or drops at the cap. A server restart loses the queue
-/// (documented debt).
+/// re-queues or drops at max_attempts or max_len. A server restart loses the
+/// queue (documented debt).
 pub struct RetryQueue {
     max_attempts: u32,
     max_len: usize,
@@ -217,17 +217,24 @@ impl RetryQueue {
         self.items.pop_front()
     }
 
-    /// Re-queue for another attempt (call on delivery failure); drops at cap.
+    /// Re-queue for another attempt (call on delivery failure); drops at
+    /// max_attempts or when the queue is at max_len.
     pub fn retry(&mut self, url: String, payload: String, attempts: u32) {
         if attempts >= self.max_attempts {
             eprintln!("notify retry exhausted for {} ({} attempts)", url, attempts);
+        } else if self.items.len() >= self.max_len {
+            eprintln!(
+                "notify queue full ({} items) — dropping retry for {}",
+                self.max_len, url
+            );
         } else {
             self.items.push_back((url, payload, attempts));
         }
     }
 }
 
-/// Retry undelivered notifications every 10s until dropped by the queue cap.
+/// Retry undelivered notifications every 10s until dropped at max_attempts
+/// or when the queue is at max_len.
 pub fn spawn_retry_loop(state: crate::app::AppState) {
     tokio::spawn(crate::supervise::spawn_supervised("notify", move || {
         retry_loop(state.clone())
