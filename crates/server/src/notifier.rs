@@ -9,7 +9,7 @@ use crate::notify::NotifyConfig;
 /// the UI; notifications are best-effort under load).
 pub const NOTIFY_QUEUE_CAP: usize = 64;
 
-/// Consume incidents forever. `delivered` counts successful deliveries
+/// Consume incidents forever. `delivered` counts fully-delivered incidents
 /// (test hook; production passes a dummy).
 pub async fn notify_loop(
     mut rx: tokio::sync::mpsc::Receiver<serde_json::Value>,
@@ -20,10 +20,12 @@ pub async fn notify_loop(
 ) {
     while let Some(incident) = rx.recv().await {
         let failed = crate::notify::notify_incident(&cfg, &incident, &ui_base_url).await;
+        if failed.is_empty() {
+            delivered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         for (url, payload) in failed {
             queue.lock().unwrap().push(url, payload);
         }
-        delivered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

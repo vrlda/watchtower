@@ -53,6 +53,14 @@ pub fn webhook_payload(incident_json: &serde_json::Value, ui_base_url: &str) -> 
     .unwrap_or_else(|_| "{}".into())
 }
 
+/// Slack message text parses `&`, `<`, `>` — escape them so untrusted
+/// content renders literally.
+pub fn escape_slack(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Slack incoming-webhook payload (legacy attachments API).
 pub fn slack_payload(incident_json: &serde_json::Value, ui_base_url: &str) -> String {
     let color = match incident_json["severity"].as_str() {
@@ -69,8 +77,8 @@ pub fn slack_payload(incident_json: &serde_json::Value, ui_base_url: &str) -> St
                     format!(
                         "- {} — {} ({})",
                         format_ts(ts),
-                        e["summary"].as_str().unwrap_or(""),
-                        e["kind"].as_str().unwrap_or("")
+                        escape_slack(e["summary"].as_str().unwrap_or("")),
+                        escape_slack(e["kind"].as_str().unwrap_or(""))
                     )
                 })
                 .collect()
@@ -78,16 +86,16 @@ pub fn slack_payload(incident_json: &serde_json::Value, ui_base_url: &str) -> St
         .unwrap_or_default();
     let text = format!(
         "{}\n{}\n{}",
-        incident_json["headline"].as_str().unwrap_or(""),
-        incident_json["cause"].as_str().unwrap_or(""),
+        escape_slack(incident_json["headline"].as_str().unwrap_or("")),
+        escape_slack(incident_json["cause"].as_str().unwrap_or("")),
         timeline.join("\n")
     );
     serde_json::to_string(&json!({
         "attachments": [{
             "color": color,
-            "title": format!("[{}] {}", incident_json["severity"].as_str().unwrap_or(""), incident_json["headline"].as_str().unwrap_or("")),
+            "title": format!("[{}] {}", escape_slack(incident_json["severity"].as_str().unwrap_or("")), escape_slack(incident_json["headline"].as_str().unwrap_or(""))),
             "text": text,
-            "footer": format!("watchtower · {}", ui_base_url.trim_end_matches('/')),
+            "footer": format!("watchtower · {}", escape_slack(ui_base_url.trim_end_matches('/'))),
         }]
     }))
     .unwrap_or_else(|_| "{}".into())
@@ -167,6 +175,7 @@ pub async fn notify_incident(
 /// (documented debt).
 pub struct RetryQueue {
     max_attempts: u32,
+    max_len: usize,
     items: std::collections::VecDeque<(String, String, u32)>,
 }
 
@@ -177,14 +186,29 @@ impl Default for RetryQueue {
 }
 
 impl RetryQueue {
+    /// Hard cap on queue length — beyond it, new pushes are dropped loudly.
+    const DEFAULT_MAX_LEN: usize = 256;
+
     pub fn new(max_attempts: u32) -> Self {
         RetryQueue {
             max_attempts,
+            max_len: Self::DEFAULT_MAX_LEN,
             items: Default::default(),
         }
     }
 
+    pub fn set_max_len(&mut self, max_len: usize) {
+        self.max_len = max_len;
+    }
+
     pub fn push(&mut self, url: String, payload: String) {
+        if self.items.len() >= self.max_len {
+            eprintln!(
+                "notify queue full ({} items) — dropping new notification",
+                self.max_len
+            );
+            return;
+        }
         self.items.push_back((url, payload, 0));
     }
 
@@ -344,5 +368,30 @@ mod tests {
         let (_, _, a3) = q.try_take().unwrap();
         q.retry("http://u".into(), "p".into(), a3 + 1); // attempts 3 >= max 3 → dropped
         assert!(q.try_take().is_none());
+    }
+
+    #[test]
+    fn retry_queue_caps_length() {
+        let mut q = RetryQueue::new(3);
+        q.set_max_len(2);
+        q.push("http://u1".into(), "p1".into());
+        q.push("http://u2".into(), "p2".into());
+        q.push("http://u3".into(), "p3".into()); // beyond cap → dropped
+        let (url, _, _) = q.try_take().unwrap();
+        assert_eq!(url, "http://u1", "oldest preserved");
+        let (url, _, _) = q.try_take().unwrap();
+        assert_eq!(url, "http://u2");
+        assert!(q.try_take().is_none(), "the third was dropped at push");
+    }
+
+    #[test]
+    fn slack_payload_escapes_special_chars() {
+        let mut inc = sample_incident();
+        inc.headline = "host <a&b> & \"quoted\"".into();
+        let payload = slack_payload(&incident_json(&inc), "http://ui");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let text = v["attachments"][0]["title"].as_str().unwrap();
+        assert!(text.contains("&lt;a&amp;b&gt;"), "escaped: {}", text);
+        assert!(!text.contains("<a&b>"));
     }
 }
