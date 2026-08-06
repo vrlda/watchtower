@@ -25,11 +25,14 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let state = watchtower_server::app::AppState::new(pool, cfg.clone()).await;
+    let mut state = watchtower_server::app::AppState::new(pool, cfg.clone()).await;
     watchtower_server::probes::spawn_probe_tasks(state.clone(), cfg.probes.clone());
     watchtower_server::correlation::spawn_runner(state.clone());
     watchtower_server::watchdog::spawn_watchdog(state.clone());
     watchtower_server::notify::spawn_retry_loop(state.clone());
+    if let Some(rx) = state.notify_rx.take() {
+        watchtower_server::notifier::spawn_notifier(state.clone(), rx);
+    }
     let app = watchtower_server::app::build_app(state).await;
     let listener = tokio::net::TcpListener::bind(&cfg.listen)
         .await

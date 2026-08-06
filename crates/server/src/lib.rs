@@ -9,6 +9,7 @@ pub mod events;
 pub mod hosts;
 pub mod incidents;
 pub mod ingest;
+pub mod notifier;
 pub mod notify;
 pub mod probes;
 pub mod supervise;

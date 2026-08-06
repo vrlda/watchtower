@@ -170,6 +170,12 @@ pub struct RetryQueue {
     items: std::collections::VecDeque<(String, String, u32)>,
 }
 
+impl Default for RetryQueue {
+    fn default() -> Self {
+        RetryQueue::new(3)
+    }
+}
+
 impl RetryQueue {
     pub fn new(max_attempts: u32) -> Self {
         RetryQueue {

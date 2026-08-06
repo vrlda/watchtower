@@ -44,10 +44,11 @@ where
             }
             Err(e) => {
                 let d = backoff.next();
+                let kind = if e.is_panic() { "panicked" } else { "failed" };
                 eprintln!(
-                    "[supervise] {} panicked ({}) — restarting in {}s",
+                    "[supervise] {} {} — restarting in {}s",
                     name,
-                    e,
+                    kind,
                     d.as_secs()
                 );
                 tokio::time::sleep(d).await;
@@ -78,6 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn restarts_after_panic_with_backoff() {
+        // abort() detaches the child task; runtime teardown kills it (test-only).
         let count = Arc::new(AtomicUsize::new(0));
         let count2 = count.clone();
         let handle = tokio::spawn(async move {

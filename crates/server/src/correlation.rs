@@ -457,11 +457,8 @@ async fn scan_loop(state: crate::app::AppState) {
                 for inc in &changed {
                     eprintln!("incident {}: {} [{}]", inc.id, inc.headline, inc.severity);
                     let json = crate::api_incidents::incident_json(inc);
-                    let failed =
-                        crate::notify::notify_incident(&state.notify, &json, &state.ui_base_url)
-                            .await;
-                    for (url, payload) in failed {
-                        state.notify_queue.lock().unwrap().push(url, payload);
+                    if state.notify_tx.try_send(json).is_err() {
+                        eprintln!("notify queue full — dropping notification for {}", inc.id);
                     }
                 }
             }

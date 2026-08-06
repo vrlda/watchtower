@@ -10,10 +10,10 @@ use crate::db;
 use crate::events;
 use crate::hosts;
 use crate::ingest;
+use crate::notifier::NOTIFY_QUEUE_CAP;
 use crate::probes::Checker;
 use tower_http::services::ServeDir;
 
-#[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::SqlitePool,
     pub cfg: ServerConfig,
@@ -29,8 +29,32 @@ pub struct AppState {
     pub ui_base_url: String,
     /// Undelivered notifications awaiting retry (drained by the retry loop).
     pub notify_queue: std::sync::Arc<std::sync::Mutex<crate::notify::RetryQueue>>,
+    /// Incident JSON enqueued by the correlation runner for the notifier task.
+    pub notify_tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+    /// Receiver taken by main to spawn the notifier; None after spawn.
+    pub notify_rx: Option<tokio::sync::mpsc::Receiver<serde_json::Value>>,
     /// Per-host watchdog episode state (heartbeat-missing emission dedup).
     pub watchdog: std::sync::Arc<std::sync::Mutex<crate::watchdog::WatchdogState>>,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        AppState {
+            pool: self.pool.clone(),
+            cfg: self.cfg.clone(),
+            checker: self.checker.clone(),
+            rules: self.rules.clone(),
+            max_body_bytes: self.max_body_bytes,
+            notify: self.notify.clone(),
+            ui_base_url: self.ui_base_url.clone(),
+            notify_queue: self.notify_queue.clone(),
+            notify_tx: self.notify_tx.clone(),
+            // The receiver is single-use (spawned once by main); clones
+            // carry a None so the original keeps the only receiver.
+            notify_rx: None,
+            watchdog: self.watchdog.clone(),
+        }
+    }
 }
 
 impl AppState {
@@ -41,12 +65,15 @@ impl AppState {
         let watchdog = std::sync::Arc::new(std::sync::Mutex::new(
             crate::watchdog::WatchdogState::default(),
         ));
+        let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(NOTIFY_QUEUE_CAP);
         AppState {
             notify: cfg.notify.clone(),
             ui_base_url: cfg.ui_base_url.clone(),
             notify_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::notify::RetryQueue::new(3),
             )),
+            notify_tx,
+            notify_rx: Some(notify_rx),
             pool,
             cfg,
             checker,
