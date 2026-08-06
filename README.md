@@ -54,10 +54,18 @@ Incidents, correlation, notifications: M4.
 ### Telegram notifications
 
     TELEGRAM_BOT_TOKEN=<bot token> watchtower-server --config server.toml
+    # optional: pin the target chat (multi-server setups)
+    TELEGRAM_CHAT_ID=123456789 watchtower-server --config server.toml
 
-Message the bot once (e.g. /start) — the chat is auto-discovered. All
-Critical and Warning incidents notify to that single channel by default
-(routing is editable in server.toml `[notify.routing]`).
+Message the bot once (e.g. /start) — without TELEGRAM_CHAT_ID the chat is
+auto-discovered from the bot's first update. With TELEGRAM_CHAT_ID the chat
+is pinned and no discovery is needed — every server reports into the same
+channel. All Critical and Warning incidents notify to that single channel
+by default (routing is editable in server.toml `[notify.routing]`).
+
+Multiple servers: run one `watchtower-server` per site, each with the same
+bot token (+ optional chat id) — incidents from every site land in the one
+Telegram chat.
 
 ## Install (Linux)
 

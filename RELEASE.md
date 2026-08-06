@@ -39,6 +39,8 @@ no capabilities). Hosts self-register on the first heartbeat.
 
     # optional: Telegram notifications (token from the environment)
     TELEGRAM_BOT_TOKEN=<bot token> watchtower-server --config server.toml
+    # multi-server: same token on every server; pin the chat for determinism
+    TELEGRAM_BOT_TOKEN=<token> TELEGRAM_CHAT_ID=<chat-id> watchtower-server ...
 
 The UI serves at http://127.0.0.1:8787/ (token prompt on first load).
 Expose the listener only where the UI + agents can reach it (default localhost).
