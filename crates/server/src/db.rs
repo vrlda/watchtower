@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::Row;
 
 /// Connect to the configured database with WAL journaling (concurrent
 /// reader + writer without lock contention).
@@ -95,6 +96,29 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    ensure_column(
+        pool,
+        "hosts",
+        "queue_len",
+        "ALTER TABLE hosts ADD COLUMN queue_len INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Ensure a column exists (SQLite lacks ADD COLUMN IF NOT EXISTS).
+async fn ensure_column(
+    pool: &sqlx::SqlitePool,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({})", table))
+        .fetch_all(pool)
+        .await?;
+    if !rows.iter().any(|r| r.get::<String, _>("name") == column) {
+        sqlx::query(ddl).execute(pool).await?;
+    }
     Ok(())
 }
 
@@ -123,5 +147,18 @@ mod tests {
             n >= 4,
             "hosts, events, incidents, incident_events tables exist"
         );
+    }
+
+    #[tokio::test]
+    async fn schema_has_queue_len_column() {
+        let pool = test_pool().await;
+        init_schema(&pool).await.unwrap();
+        let rows = sqlx::query("PRAGMA table_info(hosts)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r.get::<String, _>("name") == "queue_len"));
     }
 }

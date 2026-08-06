@@ -27,6 +27,8 @@ pub struct AppState {
     pub max_body_bytes: usize,
     pub notify: crate::notify::NotifyConfig,
     pub ui_base_url: String,
+    /// Per-host watchdog episode state (heartbeat-missing emission dedup).
+    pub watchdog: std::sync::Arc<std::sync::Mutex<crate::watchdog::WatchdogState>>,
 }
 
 impl AppState {
@@ -34,6 +36,9 @@ impl AppState {
         db::init_schema(&pool).await.expect("schema init failed");
         let rules = merged_rules(&cfg.rules);
         let checker = Checker::new();
+        let watchdog = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::watchdog::WatchdogState::default(),
+        ));
         AppState {
             notify: cfg.notify.clone(),
             ui_base_url: cfg.ui_base_url.clone(),
@@ -42,6 +47,7 @@ impl AppState {
             checker,
             rules,
             max_body_bytes: crate::ingest::MAX_BODY_BYTES,
+            watchdog,
         }
     }
 

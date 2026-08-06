@@ -30,13 +30,14 @@ pub async fn upsert_host(pool: &sqlx::SqlitePool, hb: &Heartbeat) -> Result<(), 
     // trusted for these — a skewed host would break the M4 watchdog.
     let seen = crate::ingest::now_ms();
     sqlx::query(
-        "INSERT INTO hosts (host_id, first_seen, last_seen, version)
-         VALUES (?1, ?2, ?2, ?3)
-         ON CONFLICT(host_id) DO UPDATE SET last_seen = ?2, version = ?3",
+        "INSERT INTO hosts (host_id, first_seen, last_seen, version, queue_len)
+         VALUES (?1, ?2, ?2, ?3, ?4)
+         ON CONFLICT(host_id) DO UPDATE SET last_seen = ?2, version = ?3, queue_len = ?4",
     )
     .bind(&hb.host_id)
     .bind(seen)
     .bind(&hb.version)
+    .bind(hb.queue_len as i64)
     .execute(pool)
     .await?;
     Ok(())
@@ -62,15 +63,12 @@ pub async fn list_hosts(
     Ok(Json(json!({ "hosts": hosts })))
 }
 
-/// NOTE: queue_len is not persisted in M2 (schema has no column); it is
-/// reported as 0. The M4 watchdog needs queue-growth detection and must add
-/// the column then.
 pub async fn fetch_hosts(
     pool: &sqlx::SqlitePool,
     host: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String, i64, i64, String)>(
-        "SELECT host_id, first_seen, last_seen, version
+    let rows = sqlx::query_as::<_, (String, i64, i64, String, i64)>(
+        "SELECT host_id, first_seen, last_seen, version, queue_len
          FROM hosts
          WHERE (?1 IS NULL OR host_id = ?1)
          ORDER BY host_id",
@@ -80,13 +78,13 @@ pub async fn fetch_hosts(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(host_id, first_seen, last_seen, version)| {
+        .map(|(host_id, first_seen, last_seen, version, queue_len)| {
             json!({
                 "host_id": host_id,
                 "first_seen": first_seen,
                 "last_seen": last_seen,
                 "version": version,
-                "queue_len": 0,
+                "queue_len": queue_len,
             })
         })
         .collect())
@@ -163,7 +161,10 @@ mod tests {
             hosts[0]["last_seen"].as_i64().unwrap() - hosts[0]["first_seen"].as_i64().unwrap()
                 < 5000
         );
-        assert_eq!(hosts[0]["queue_len"], 0);
+        assert_eq!(
+            hosts[0]["queue_len"], 2,
+            "queue_len round-trips (last POST wins)"
+        );
     }
 
     #[tokio::test]

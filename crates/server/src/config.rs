@@ -22,6 +22,8 @@ struct ServerConfigToml {
     rules: Option<Vec<crate::correlation::Rule>>,
     notify: Option<crate::notify::NotifyConfig>,
     ui_base_url: Option<String>,
+    watchdog_heartbeat_grace_secs: Option<i64>,
+    watchdog_queue_threshold: Option<i64>,
 }
 
 impl From<ServerConfigToml> for ServerConfig {
@@ -40,6 +42,12 @@ impl From<ServerConfigToml> for ServerConfig {
             rules,
             notify: t.notify.unwrap_or(defaults.notify),
             ui_base_url: t.ui_base_url.unwrap_or(defaults.ui_base_url),
+            watchdog_heartbeat_grace_secs: t
+                .watchdog_heartbeat_grace_secs
+                .unwrap_or(defaults.watchdog_heartbeat_grace_secs),
+            watchdog_queue_threshold: t
+                .watchdog_queue_threshold
+                .unwrap_or(defaults.watchdog_queue_threshold),
         }
     }
 }
@@ -70,6 +78,20 @@ pub struct ServerConfig {
     /// UI base URL for links in notifications.
     #[serde(default)]
     pub ui_base_url: String,
+    /// Seconds a host may go without a heartbeat before the watchdog fires.
+    #[serde(default = "default_heartbeat_grace")]
+    pub watchdog_heartbeat_grace_secs: i64,
+    /// Spool queue length that triggers AgentQueueGrowing.
+    #[serde(default = "default_queue_threshold")]
+    pub watchdog_queue_threshold: i64,
+}
+
+fn default_heartbeat_grace() -> i64 {
+    90
+}
+
+fn default_queue_threshold() -> i64 {
+    100
 }
 
 fn default_scan_interval() -> i64 {
@@ -87,6 +109,8 @@ impl Default for ServerConfig {
             rules: Vec::new(),
             notify: crate::notify::NotifyConfig::default(),
             ui_base_url: "http://127.0.0.1:8787".into(),
+            watchdog_heartbeat_grace_secs: default_heartbeat_grace(),
+            watchdog_queue_threshold: default_queue_threshold(),
         }
     }
 }
