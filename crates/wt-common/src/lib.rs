@@ -44,6 +44,9 @@ pub enum EventKind {
     NewOutboundConnection,
     /// Established-connection rate deviated from the rolling baseline (Warning).
     ConnectionRateSpike,
+    /// Many distinct new remote connections within a short window — likely
+    /// a port scan (Warning).
+    PortScanSpike,
     /// A systemd unit transitioned to active (Info — timeline context).
     /// Emitted by the agent's journald sensor.
     ServiceRestarted,
@@ -158,6 +161,11 @@ pub struct Config {
     pub request_rate_threshold: u32,
     /// Seconds window for request-rate counting.
     pub request_rate_window_secs: i64,
+    /// Distinct remote connections within the window that indicate a port
+    /// scan.
+    pub scan_threshold: u32,
+    /// Seconds window for scan counting.
+    pub scan_window_secs: i64,
 }
 
 impl Default for Config {
@@ -192,6 +200,8 @@ impl Default for Config {
             access_log_paths: Vec::new(),
             request_rate_threshold: 200,
             request_rate_window_secs: 60,
+            scan_threshold: 25,
+            scan_window_secs: 10,
         }
     }
 }
@@ -365,5 +375,18 @@ mod tests {
         assert!(cfg.access_log_paths.is_empty());
         assert_eq!(cfg.request_rate_threshold, 200);
         assert_eq!(cfg.request_rate_window_secs, 60);
+    }
+
+    #[test]
+    fn p2t6_kind_serializes() {
+        let v: serde_json::Value = serde_json::to_value(EventKind::PortScanSpike).unwrap();
+        assert_eq!(v, "PortScanSpike");
+    }
+
+    #[test]
+    fn config_has_scan_fields() {
+        let cfg = Config::default();
+        assert_eq!(cfg.scan_threshold, 25);
+        assert_eq!(cfg.scan_window_secs, 10);
     }
 }

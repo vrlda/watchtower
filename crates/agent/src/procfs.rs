@@ -148,6 +148,26 @@ fn split_addr_port(s: &str) -> (&str, u16) {
     }
 }
 
+/// Parse a /proc/net/udp or udp6 file body. UDP has no listen/established
+/// states — every row is kept as a (local ip, port) pair.
+pub fn parse_udp_table(text: &str, v6: bool) -> Vec<(String, u16)> {
+    let mut out = Vec::new();
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 2 {
+            continue;
+        }
+        let (local_ip, local_port) = split_addr_port(fields[1]);
+        let ip = if v6 {
+            decode_ipv6(local_ip)
+        } else {
+            decode_ipv4(local_ip)
+        };
+        out.push((ip, local_port));
+    }
+    out
+}
+
 impl ProcFs {
     pub fn new(base: PathBuf) -> Self {
         ProcFs { base }
@@ -251,6 +271,16 @@ impl ProcFs {
         Ok(parse_tcp_table(&text, true))
     }
 
+    pub fn udp_entries(&self) -> Result<Vec<(String, u16)>, String> {
+        let text = self.read("net/udp")?;
+        Ok(parse_udp_table(&text, false))
+    }
+
+    pub fn udp6_entries(&self) -> Result<Vec<(String, u16)>, String> {
+        let text = self.read("net/udp6")?;
+        Ok(parse_udp_table(&text, true))
+    }
+
     pub fn mounts(&self) -> Result<Vec<Mount>, String> {
         let text = self.read("mounts")?;
         Ok(parse_mounts(&text))
@@ -320,6 +350,20 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| e.local_ip == "::" && e.local_port == 9000 && e.state == "ESTABLISHED"));
+    }
+
+    #[test]
+    fn parses_udp_listens() {
+        let p = ProcFs::new(test_base());
+        let udp = p.udp_entries().unwrap();
+        assert!(udp
+            .iter()
+            .any(|(ip, port)| ip == "0.0.0.0" && *port == 5353));
+        assert!(udp
+            .iter()
+            .any(|(ip, port)| ip == "127.0.0.1" && *port == 53));
+        let udp6 = p.udp6_entries().unwrap();
+        assert!(udp6.iter().any(|(ip, port)| ip == "::" && *port == 5353));
     }
 
     #[test]

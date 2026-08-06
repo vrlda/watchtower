@@ -461,7 +461,13 @@ pub fn run_once(
     }
 
     // netflow sensor
-    evs.extend(state.net.observe(procfs, ts, host_id));
+    evs.extend(state.net.observe(
+        procfs,
+        ts,
+        host_id,
+        cfg.scan_threshold,
+        cfg.scan_window_secs * 1000,
+    ));
 
     // disk/inode sensor
     evs.extend(crate::sensors::disk::disk_events(procfs, cfg, ts, host_id));
