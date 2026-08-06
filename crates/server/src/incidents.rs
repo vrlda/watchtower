@@ -219,18 +219,18 @@ pub async fn touch_incident(
     Ok(now)
 }
 
-/// Ack or resolve an incident: sets the status, stamps the ack/resolve time,
-/// and bumps updated_at. Returns true when a row was updated (unknown id →
-/// false).
-pub async fn set_status(
+/// Ack or resolve an incident at an explicit timestamp: sets the status,
+/// stamps the ack/resolve time, and bumps updated_at. Returns true when a
+/// row was updated (unknown id → false).
+pub async fn set_status_at(
     pool: &sqlx::SqlitePool,
     id: &str,
     status: IncidentStatus,
+    now: i64,
 ) -> Result<bool, sqlx::Error> {
     if status == IncidentStatus::Open {
         return Ok(false);
     }
-    let now = now_ms();
     let (wire, col) = match status {
         IncidentStatus::Acknowledged => ("acknowledged", "acked_at"),
         IncidentStatus::Resolved => ("resolved", "resolved_at"),
@@ -245,6 +245,17 @@ pub async fn set_status(
         .execute(pool)
         .await?;
     Ok(res.rows_affected() > 0)
+}
+
+/// Ack or resolve an incident at now: sets the status, stamps the
+/// ack/resolve time, and bumps updated_at. Returns true when a row was
+/// updated (unknown id → false).
+pub async fn set_status(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    status: IncidentStatus,
+) -> Result<bool, sqlx::Error> {
+    set_status_at(pool, id, status, now_ms()).await
 }
 
 /// List summaries (no timelines), newest first.

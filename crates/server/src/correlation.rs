@@ -914,10 +914,17 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
             .await
             .unwrap();
         assert_eq!(incs.len(), 0, "absorb is a no-op — nothing new to report");
-        // resolve, then re-scan within cooldown → nothing (BOTH passes check cooldown)
-        crate::incidents::set_status(&p, &id, crate::incidents::IncidentStatus::Resolved)
-            .await
-            .unwrap();
+        // resolve at the FAKE scan clock, so the cooldown diff is a real
+        // +10ms (the check is now - resolved_at < 600_000), then re-scan
+        // within cooldown → nothing (BOTH passes check cooldown)
+        crate::incidents::set_status_at(
+            &p,
+            &id,
+            crate::incidents::IncidentStatus::Resolved,
+            1_000_000_000_010,
+        )
+        .await
+        .unwrap();
         let incs = scan_and_absorb(&p, &rules, 1_000_000_020_000)
             .await
             .unwrap();

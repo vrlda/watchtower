@@ -18,6 +18,27 @@ fn ev(id: &str, ts: i64, kind: EventKind, sev: Severity, key: &str) -> AgentEven
     }
 }
 
+fn fresh_sequence(base: i64) -> Vec<AgentEvent> {
+    // a genuinely new occurrence after the cooldown: the config file changed
+    // again and the service failed again
+    vec![
+        ev(
+            "e2-fim",
+            base,
+            EventKind::FileChanged,
+            Severity::Warning,
+            "fim:/etc/myapp/config.yml",
+        ),
+        ev(
+            "e2-fail",
+            base + 50,
+            EventKind::ServiceFailed,
+            Severity::Critical,
+            "svc:myapp.service",
+        ),
+    ]
+}
+
 fn demo_sequence() -> Vec<AgentEvent> {
     // product spec §7: ssh new ip → sudo → config modified → app restarted →
     // app errors (ServiceFailed proxy) → cpu rises → health check fails
@@ -133,9 +154,16 @@ async fn demo_produces_one_incident_with_full_timeline() {
         .unwrap()
         .unwrap();
     assert_eq!(got.status, IncidentStatus::Acknowledged);
-    incidents::set_status(&state.pool, &inc.id, IncidentStatus::Resolved)
-        .await
-        .unwrap();
+    // resolve at the FAKE scan clock so the cooldown diff below is a real
+    // +10ms of window arithmetic (now - resolved_at < 600_000)
+    incidents::set_status_at(
+        &state.pool,
+        &inc.id,
+        IncidentStatus::Resolved,
+        1_000_000_000_010,
+    )
+    .await
+    .unwrap();
     let got = incidents::fetch_incident(&state.pool, &inc.id)
         .await
         .unwrap()
@@ -143,9 +171,28 @@ async fn demo_produces_one_incident_with_full_timeline() {
     assert_eq!(got.status, IncidentStatus::Resolved);
     assert!(got.resolved_at.is_some());
 
-    // cooldown: re-scanning the same window within the cooldown does not re-open
-    let changed = scan_and_absorb(&state.pool, &rules, 1_000_000_000_010)
+    // cooldown: re-scanning the same window 10ms after the resolve does not
+    // re-open (10ms < 600s cooldown)
+    let changed = scan_and_absorb(&state.pool, &rules, 1_000_000_000_020)
         .await
         .unwrap();
     assert!(changed.is_empty(), "cooldown suppresses re-open");
+
+    // honest re-open: cooldown expired (600_001ms > 600_000ms) — a FRESH
+    // batch re-triggers the rule and opens a NEW incident with the same key
+    // (dedup is keyed on OPEN incidents only; the resolution is long gone)
+    let batch_base = 1_000_000_599_000; // inside the 300s scan window at 600_011
+    watchtower_server::ingest::store_events(&state.pool, &fresh_sequence(batch_base))
+        .await
+        .unwrap();
+    let changed = scan_and_absorb(&state.pool, &rules, 1_000_000_600_011)
+        .await
+        .unwrap();
+    assert_eq!(changed.len(), 1, "cooldown expired → the rule re-opens");
+    let reopened = &changed[0];
+    assert_eq!(
+        reopened.key, inc.key,
+        "same rule:host key after the cooldown"
+    );
+    assert_ne!(reopened.id, inc.id, "a NEW incident, not the resolved one");
 }
