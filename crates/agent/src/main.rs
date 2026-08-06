@@ -1,4 +1,5 @@
 mod cmd;
+mod discover;
 mod engine;
 mod hostid;
 mod journald;
@@ -28,6 +29,8 @@ enum Cmd {
     Run,
     /// One-shot: collect and print events, then exit.
     Check,
+    /// Print the auto-discovery checklist, then exit.
+    Discover,
 }
 
 fn load_config(path: &PathBuf) -> Config {
@@ -85,6 +88,16 @@ fn main() {
                 }
                 println!("no issues detected");
             }
+        }
+        Cmd::Discover => {
+            let discover_procfs = procfs::ProcFs::new(PathBuf::from("/"));
+            for check in
+                discover::run_all(&PathBuf::from("/"), runners.sys.as_ref(), &discover_procfs)
+            {
+                let mark = if check.ok { "✓" } else { "✗" };
+                println!("{} {} — {}", mark, check.label, check.detail);
+            }
+            println!("\nYour server is now monitored.");
         }
         Cmd::Run => {
             let mut deduper = engine::Deduper::new(cfg.dedup_secs);
