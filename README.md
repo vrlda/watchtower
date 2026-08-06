@@ -51,6 +51,17 @@ Control plane core (`watchtower-server`):
 
 Incidents, correlation, notifications: M4.
 
+## Install (Linux)
+
+    # from a release build (hosting is post-MVP — use a local build):
+    WATCHTOWER_BINARY=target/release/watchtower-agent \
+      SERVER_URL=http://control.example.com TOKEN=secret \
+      sudo sh scripts/install.sh
+
+The installer: installs the binary, writes /etc/watchtower/agent.toml,
+installs + starts the systemd unit, and prints the discovery checklist.
+The host self-registers on the first heartbeat.
+
 ## Known M1 limitations
 
 - Spool is capped at 10 MB (drops new batches with a loud log beyond that; backoff is a fixed 30 s heartbeat-throttle — exponential backoff is M2)
