@@ -405,8 +405,7 @@ pub async fn recently_resolved(
     })
 }
 
-/// Spawn the correlation loop: scan every interval, notify on changes
-/// (notify wiring lands in Task 8; log for now).
+/// Spawn the correlation loop: scan every interval, notify on changes.
 pub fn spawn_runner(state: crate::app::AppState) {
     let interval = state.cfg.scan_interval_secs.max(5); // clamp: never scan faster than every 5s
     tokio::spawn(async move {
@@ -417,8 +416,21 @@ pub fn spawn_runner(state: crate::app::AppState) {
             let now = crate::ingest::now_ms();
             match scan_and_absorb(&state.pool, &state.rules, now).await {
                 Ok(changed) => {
+                    if changed.is_empty() {
+                        continue;
+                    }
                     for inc in &changed {
                         eprintln!("incident {}: {} [{}]", inc.id, inc.headline, inc.severity);
+                        let json = crate::api_incidents::incident_json(inc);
+                        let failed = crate::notify::notify_incident(
+                            &state.notify,
+                            &json,
+                            &state.ui_base_url,
+                        )
+                        .await;
+                        for (url, payload) in failed {
+                            state.notify_queue.lock().unwrap().push(url, payload);
+                        }
                     }
                 }
                 Err(e) => eprintln!("correlation scan failed: {e}"),
@@ -430,6 +442,7 @@ pub fn spawn_runner(state: crate::app::AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use wt_common::{AgentEvent, EventKind, Severity};
 
     fn ev(id: &str, ts: i64, kind: EventKind, sev: Severity, key: &str) -> AgentEvent {
@@ -912,5 +925,72 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
             incs.is_empty(),
             "cooldown suppresses re-open (rule AND fallback passes)"
         );
+    }
+
+    #[tokio::test]
+    async fn notifier_fires_for_changed_incidents() {
+        // capture delivery: point the webhook at a local listener
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
+            let mut buf = [0u8; 65536];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).into_owned();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+            req
+        });
+        let pool = pool().await;
+        let events = vec![
+            ev(
+                "e-1",
+                999_999_700_000,
+                EventKind::FileChanged,
+                Severity::Warning,
+                "fim:x",
+            ),
+            ev(
+                "e-2",
+                999_999_800_000,
+                EventKind::ServiceFailed,
+                Severity::Critical,
+                "svc:myapp.service",
+            ),
+        ];
+        crate::ingest::store_events(&pool, &events).await.unwrap();
+        let cfg = crate::config::ServerConfig {
+            ui_base_url: "http://ui".into(),
+            notify: crate::notify::NotifyConfig {
+                webhook_url: format!("http://{}", addr),
+                slack_url: String::new(),
+                routing: crate::notify::default_routing(),
+            },
+            ..Default::default()
+        };
+        let rules = default_rules();
+        let changed = scan_and_absorb(&pool, &rules, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(changed.len(), 1);
+        let inc = crate::incidents::fetch_incident(&pool, &changed[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+        let json = crate::api_incidents::incident_json(&inc);
+        let failed = crate::notify::notify_incident(&cfg.notify, &json, &cfg.ui_base_url).await;
+        assert!(failed.is_empty(), "delivery succeeded");
+        let req = handle.join().unwrap();
+        assert!(req.contains("watchtower.incident"));
+        assert!(req.contains("myapp.service became unhealthy"));
     }
 }

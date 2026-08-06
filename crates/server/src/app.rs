@@ -27,6 +27,8 @@ pub struct AppState {
     pub max_body_bytes: usize,
     pub notify: crate::notify::NotifyConfig,
     pub ui_base_url: String,
+    /// Undelivered notifications awaiting retry (drained by the retry loop).
+    pub notify_queue: std::sync::Arc<std::sync::Mutex<crate::notify::RetryQueue>>,
     /// Per-host watchdog episode state (heartbeat-missing emission dedup).
     pub watchdog: std::sync::Arc<std::sync::Mutex<crate::watchdog::WatchdogState>>,
 }
@@ -42,6 +44,9 @@ impl AppState {
         AppState {
             notify: cfg.notify.clone(),
             ui_base_url: cfg.ui_base_url.clone(),
+            notify_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::notify::RetryQueue::new(3),
+            )),
             pool,
             cfg,
             checker,
