@@ -51,6 +51,45 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts)")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS incidents (
+            id         TEXT PRIMARY KEY,
+            key        TEXT NOT NULL,
+            host_id    TEXT NOT NULL DEFAULT '',
+            severity   TEXT NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'open',
+            headline   TEXT NOT NULL,
+            cause      TEXT NOT NULL DEFAULT '',
+            actions_json TEXT NOT NULL DEFAULT '[]',
+            affected_json TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            acked_at   INTEGER,
+            resolved_at INTEGER
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_incidents_key ON incidents (key, status)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents (created_at DESC)")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS incident_events (
+            incident_id TEXT NOT NULL,
+            event_id    TEXT NOT NULL,
+            PRIMARY KEY (incident_id, event_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_incident_events_event ON incident_events (event_id)",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -75,6 +114,9 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert!(n >= 2, "hosts and events tables exist");
+        assert!(
+            n >= 4,
+            "hosts, events, incidents, incident_events tables exist"
+        );
     }
 }

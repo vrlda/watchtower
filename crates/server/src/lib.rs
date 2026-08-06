@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod events;
 pub mod hosts;
+pub mod incidents;
 pub mod ingest;
 pub mod probes;
 

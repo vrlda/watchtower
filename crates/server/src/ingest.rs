@@ -89,14 +89,14 @@ pub async fn store_events(
 
 /// PascalCase wire strings, identical to the serde JSON representation
 /// (server-generated events go through the same store).
-fn kind_wire(kind: EventKind) -> String {
+pub(crate) fn kind_wire(kind: EventKind) -> String {
     serde_json::to_string(&kind)
         .unwrap_or_default()
         .trim_matches('"')
         .to_string()
 }
 
-fn severity_wire(sev: Severity) -> String {
+pub(crate) fn severity_wire(sev: Severity) -> String {
     serde_json::to_string(&sev)
         .unwrap_or_default()
         .trim_matches('"')
