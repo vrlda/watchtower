@@ -17,6 +17,117 @@ pub struct NetDevErrors {
     pub tx: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TcpEntry {
+    pub local_ip: String,
+    pub local_port: u16,
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub state: String,
+}
+
+/// Decode the little-endian hex IPv4 from /proc/net/tcp.
+/// "0100007F" → bytes [01 00 00 7F] → reversed → 127.0.0.1
+pub fn decode_ipv4(hex: &str) -> String {
+    let mut bytes = [0u8; 4];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        if let Ok(v) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
+            *b = v;
+        }
+    }
+    bytes.reverse();
+    format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
+}
+
+/// Decode the 4 little-endian 32-bit words of the hex IPv6 from
+/// /proc/net/tcp6. Each 8-hex-char group is a little-endian u32; the group
+/// renders as two 16-bit words. v4-mapped (::ffff:a.b.c.d) and all-zero
+/// (::) forms are handled explicitly.
+pub fn decode_ipv6(hex: &str) -> String {
+    let mut groups: Vec<String> = Vec::new();
+    let mut vals: Vec<u32> = Vec::new();
+    for g in 0..4 {
+        let chunk = &hex[g * 8..g * 8 + 8];
+        let mut v: u32 = 0;
+        for (i, c) in chunk.as_bytes().chunks(2).enumerate() {
+            let byte = u8::from_str_radix(std::str::from_utf8(c).unwrap_or("00"), 16).unwrap_or(0);
+            v |= (byte as u32) << (8 * i);
+        }
+        vals.push(v);
+        let w_hi = (v >> 16) as u16;
+        let w_lo = (v & 0xffff) as u16;
+        if w_hi == 0 && w_lo == 0 {
+            groups.push("0".into());
+        } else if w_hi == 0 {
+            groups.push(format!("{:x}", w_lo));
+        } else {
+            groups.push(format!("{:x}:{:x}", w_hi, w_lo));
+        }
+    }
+    // v4-mapped: ::ffff:a.b.c.d (group 2 raw hex is "FFFF0000")
+    if vals[0] == 0 && vals[1] == 0 && vals[2] == 0x0000ffff {
+        let q = vals[3];
+        return format!(
+            "::ffff:{}.{}.{}.{}",
+            (q >> 24) & 0xff,
+            (q >> 16) & 0xff,
+            (q >> 8) & 0xff,
+            q & 0xff
+        );
+    }
+    let joined = groups.join(":");
+    if joined == "0:0:0:0" {
+        return "::".into();
+    }
+    if let Some(rest) = joined.strip_prefix("0:0:") {
+        return format!("::{}", rest);
+    }
+    joined
+}
+
+/// Parse a /proc/net/tcp or tcp6 file body into entries.
+/// State hex: 0A = LISTEN, 01 = ESTABLISHED (the two we track).
+pub fn parse_tcp_table(text: &str, v6: bool) -> Vec<TcpEntry> {
+    let mut out = Vec::new();
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let (local_ip, local_port) = split_addr_port(fields[1]);
+        let (remote_ip, remote_port) = split_addr_port(fields[2]);
+        let state = match fields[3] {
+            "0A" => "LISTEN",
+            "01" => "ESTABLISHED",
+            _ => continue,
+        };
+        out.push(TcpEntry {
+            local_ip: if v6 {
+                decode_ipv6(local_ip)
+            } else {
+                decode_ipv4(local_ip)
+            },
+            local_port,
+            remote_ip: if v6 {
+                decode_ipv6(remote_ip)
+            } else {
+                decode_ipv4(remote_ip)
+            },
+            remote_port,
+            state: state.into(),
+        });
+    }
+    out
+}
+
+/// "0100007F:1F90" → ("0100007F", 8080)
+fn split_addr_port(s: &str) -> (&str, u16) {
+    match s.rsplit_once(':') {
+        Some((ip, port)) => (ip, u16::from_str_radix(port, 16).unwrap_or(0)),
+        None => (s, 0),
+    }
+}
+
 impl ProcFs {
     pub fn new(base: PathBuf) -> Self {
         ProcFs { base }
@@ -105,6 +216,16 @@ impl ProcFs {
         }
         Ok(out)
     }
+
+    pub fn tcp_entries(&self) -> Result<Vec<TcpEntry>, String> {
+        let text = self.read("net/tcp")?;
+        Ok(parse_tcp_table(&text, false))
+    }
+
+    pub fn tcp6_entries(&self) -> Result<Vec<TcpEntry>, String> {
+        let text = self.read("net/tcp6")?;
+        Ok(parse_tcp_table(&text, true))
+    }
 }
 
 #[cfg(test)]
@@ -143,5 +264,47 @@ mod tests {
         assert_eq!(errs[&"eth0".to_string()].tx, 3);
         assert_eq!(errs[&"eth1".to_string()].rx, 7);
         assert_eq!(errs[&"lo".to_string()].tx, 0);
+    }
+
+    #[test]
+    fn parses_tcp_listen_and_established() {
+        let p = ProcFs::new(test_base());
+        let entries = p.tcp_entries().unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.local_ip == "127.0.0.1" && e.local_port == 8080 && e.state == "LISTEN"));
+        assert!(entries.iter().any(|e| e.remote_ip == "127.0.0.1"
+            && e.remote_port == 8080
+            && e.state == "ESTABLISHED"));
+        assert!(entries
+            .iter()
+            .any(|e| e.remote_ip == "93.184.216.47" && e.remote_port == 443));
+    }
+
+    #[test]
+    fn parses_tcp6_listen() {
+        let p = ProcFs::new(test_base());
+        let entries = p.tcp6_entries().unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.local_ip == "::" && e.local_port == 8080 && e.state == "LISTEN"));
+        assert!(entries
+            .iter()
+            .any(|e| e.local_ip == "::" && e.local_port == 9000 && e.state == "ESTABLISHED"));
+    }
+
+    #[test]
+    fn decodes_ipv4_hex_little_endian() {
+        assert_eq!(decode_ipv4("0100007F"), "127.0.0.1");
+        assert_eq!(decode_ipv4("8F2D5A5D"), "93.90.45.143");
+    }
+
+    #[test]
+    fn decodes_ipv6_groups_little_endian() {
+        assert_eq!(decode_ipv6("00000000000000000000000000000000"), "::");
+        assert_eq!(
+            decode_ipv6("0000000000000000FFFF00000100007F"),
+            "::ffff:127.0.0.1"
+        );
     }
 }
