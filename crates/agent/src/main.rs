@@ -4,6 +4,7 @@ mod discover;
 mod engine;
 mod hostid;
 mod journald;
+mod logs;
 mod procfs;
 mod sensors;
 mod telemetry;

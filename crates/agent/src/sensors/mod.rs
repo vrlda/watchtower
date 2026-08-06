@@ -1,3 +1,4 @@
+pub mod accesslog;
 pub mod certs;
 pub mod disk;
 pub mod docker;

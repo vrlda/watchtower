@@ -186,6 +186,10 @@ pub struct AgentState {
     pub cert_paths: Vec<String>,
     /// Last TLS cert scan time (ms); gates the openssl spawn.
     pub last_cert_scan: i64,
+    /// Tail cursor per access log path.
+    pub access_tails: HashMap<String, crate::logs::TailState>,
+    /// (poll ts, lines read) pairs within the request-rate window.
+    pub request_counts: VecDeque<(i64, u32)>,
 }
 
 impl AgentState {
@@ -218,6 +222,8 @@ impl AgentState {
                 crate::sensors::certs::expand_paths(&cfg.cert_paths)
             },
             last_cert_scan: 0,
+            access_tails: Default::default(),
+            request_counts: Default::default(),
         }
     }
 
@@ -459,6 +465,64 @@ pub fn run_once(
 
     // disk/inode sensor
     evs.extend(crate::sensors::disk::disk_events(procfs, cfg, ts, host_id));
+
+    // access-log sensor (config-gated)
+    for path in &cfg.access_log_paths {
+        let tail = state.access_tails.entry(path.clone()).or_default();
+        let lines = tail.read_new(std::path::Path::new(path));
+        let mut errors_5xx = 0usize;
+        for l in &lines {
+            if let Some(al) = crate::sensors::accesslog::parse_combined(l) {
+                if (500..600).contains(&al.status) {
+                    errors_5xx += 1;
+                }
+            }
+        }
+        if errors_5xx > 0 {
+            evs.push(AgentEvent {
+                id: format!("http5xx-{}-{}", path, ts),
+                ts,
+                host_id: host_id.into(),
+                key: format!("http5xx:{}", path),
+                kind: EventKind::ErrorRateSpike,
+                severity: Severity::Warning,
+                summary: format!("{} 5xx responses from {}", errors_5xx, path),
+                evidence: vec![Evidence {
+                    ts,
+                    source: "accesslog".into(),
+                    detail: format!("Path={} FiveXx={}", path, errors_5xx),
+                }],
+            });
+        }
+        state.request_counts.push_back((ts, lines.len() as u32));
+    }
+    // request-rate spike (counts within the window, episode semantics)
+    let window_ms = cfg.request_rate_window_secs.max(10) * 1000;
+    state.request_counts.retain(|(t, _)| *t + window_ms >= ts);
+    let total: u32 = state.request_counts.iter().map(|(_, n)| *n).sum();
+    if total >= cfg.request_rate_threshold {
+        state.request_counts.clear();
+        evs.push(AgentEvent {
+            id: format!("reqrate-{}", ts),
+            ts,
+            host_id: host_id.into(),
+            key: "http:reqrate".into(),
+            kind: EventKind::RequestRateSpike,
+            severity: Severity::Warning,
+            summary: format!(
+                "request rate exceeded {} in {}s",
+                cfg.request_rate_threshold, cfg.request_rate_window_secs
+            ),
+            evidence: vec![Evidence {
+                ts,
+                source: "accesslog".into(),
+                detail: format!(
+                    "Requests={} WindowSecs={}",
+                    total, cfg.request_rate_window_secs
+                ),
+            }],
+        });
+    }
 
     // docker sensor (fail-open: no docker binary / daemon → nothing)
     if cfg.docker_enabled {
@@ -1061,6 +1125,51 @@ mod tests {
         assert!(evs.iter().any(
             |e| e.kind == EventKind::ClockChange && e.severity == wt_common::Severity::Warning
         ));
+    }
+
+    #[test]
+    fn run_once_access_log_signals() {
+        let log = std::env::temp_dir().join(format!("wt-access-{}", std::process::id()));
+        let cfg = Config {
+            access_log_paths: vec![log.to_string_lossy().into_owned()],
+            request_rate_threshold: 3,
+            request_rate_window_secs: 60,
+            ..Default::default()
+        };
+        let mut state = AgentState::new(&cfg, "h-1");
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let runners = runners_with("", "", "");
+        let mut deduper = Deduper::new(300);
+        // seed a healthy line first (the tail baseline), then 5xx lines
+        std::fs::write(
+            &log,
+            r#"127.0.0.1 - - [07/Aug/2026:10:00:00 +0000] "GET / HTTP/1.1" 200 5 "-" "-""#
+                .to_owned()
+                + "\n",
+        )
+        .unwrap();
+        let _ = run_once(&cfg, &mut deduper, "h-1", 1_000, &p, &runners, &mut state);
+        let lines: Vec<String> = (0..4)
+            .map(|i| {
+                format!(
+                    r#"127.0.0.1 - - [07/Aug/2026:10:00:0{} +0000] "GET / HTTP/1.1" 503 5 "-" "-""#,
+                    i
+                )
+            })
+            .collect();
+        std::fs::write(&log, lines.join("\n") + "\n").unwrap();
+        let evs = run_once(&cfg, &mut deduper, "h-1", 2_000, &p, &runners, &mut state);
+        assert!(
+            evs.iter().any(|e| e.kind == EventKind::ErrorRateSpike),
+            "5xx must emit"
+        );
+        assert!(
+            evs.iter().any(|e| e.kind == EventKind::RequestRateSpike),
+            "4 requests >= threshold 3"
+        );
+        std::fs::remove_file(&log).ok();
     }
 
     struct FakeSys {

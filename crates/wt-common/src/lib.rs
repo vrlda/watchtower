@@ -69,6 +69,9 @@ pub enum EventKind {
     FsReadOnly,
     /// The system clock was adjusted (NTP step) (Warning).
     ClockChange,
+    /// Request volume from access logs exceeded the threshold within the
+    /// window (Warning).
+    RequestRateSpike,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +150,14 @@ pub struct Config {
     pub ssh_brute_threshold: u32,
     /// Seconds window for brute-force counting.
     pub ssh_brute_window_secs: u64,
+    /// Access log files (nginx/apache combined format) to tail for 5xx and
+    /// request-rate signals. Empty = sensor off.
+    #[serde(default)]
+    pub access_log_paths: Vec<String>,
+    /// Requests within the window that trigger a RequestRateSpike.
+    pub request_rate_threshold: u32,
+    /// Seconds window for request-rate counting.
+    pub request_rate_window_secs: i64,
 }
 
 impl Default for Config {
@@ -178,6 +189,9 @@ impl Default for Config {
             cert_scan_interval_secs: 3600,
             ssh_brute_threshold: 5,
             ssh_brute_window_secs: 300,
+            access_log_paths: Vec::new(),
+            request_rate_threshold: 200,
+            request_rate_window_secs: 60,
         }
     }
 }
@@ -337,5 +351,19 @@ mod tests {
         assert_eq!(cfg.cert_warn_days, 14);
         assert_eq!(cfg.cert_crit_days, 3);
         assert_eq!(cfg.cert_scan_interval_secs, 3600);
+    }
+
+    #[test]
+    fn p2t5_kind_serializes() {
+        let v: serde_json::Value = serde_json::to_value(EventKind::RequestRateSpike).unwrap();
+        assert_eq!(v, "RequestRateSpike");
+    }
+
+    #[test]
+    fn config_has_accesslog_fields() {
+        let cfg = Config::default();
+        assert!(cfg.access_log_paths.is_empty());
+        assert_eq!(cfg.request_rate_threshold, 200);
+        assert_eq!(cfg.request_rate_window_secs, 60);
     }
 }
