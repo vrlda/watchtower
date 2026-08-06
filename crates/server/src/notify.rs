@@ -272,25 +272,38 @@ pub async fn notify_incident(
     let slack = slack_payload(incident_json, ui_base_url);
     for channel in channels_for(cfg, severity) {
         if channel == "telegram" {
-            if let Some(client) = telegram_client(cfg.telegram_token.as_deref()) {
-                let text = telegram_payload(incident_json, ui_base_url);
-                let ok =
-                    tokio::task::spawn_blocking(move || telegram_send(client, TELEGRAM_API, &text))
+            match cfg.telegram_token.as_deref() {
+                None => {
+                    // telegram-only default routing + no token = silent
+                    // black hole; make the misconfig self-evident
+                    eprintln!("telegram channel configured but TELEGRAM_BOT_TOKEN is not set");
+                    continue;
+                }
+                Some(token) => {
+                    if let Some(client) = telegram_client(Some(token)) {
+                        let text = telegram_payload(incident_json, ui_base_url);
+                        let ok = tokio::task::spawn_blocking(move || {
+                            telegram_send(client, TELEGRAM_API, &text)
+                        })
                         .await
                         .unwrap_or_else(|_| Err("join failed".into()));
-                match ok {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        eprintln!("telegram: no chat registered yet — message the bot once");
+                        match ok {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                eprintln!(
+                                    "telegram: no chat registered yet — message the bot once"
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("telegram send failed: {}", e);
+                                // best-effort: no retry-queue push (empty-url items would
+                                // retry pointlessly); the next incident retries naturally
+                            }
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("telegram send failed: {}", e);
-                        // best-effort: no retry-queue push (empty-url items would
-                        // retry pointlessly); the next incident retries naturally
-                    }
+                    continue;
                 }
             }
-            continue;
         }
         let (url, payload) = match channel.as_str() {
             "webhook" => (cfg.webhook_url.clone(), webhook.clone()),
