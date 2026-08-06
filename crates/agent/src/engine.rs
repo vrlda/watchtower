@@ -273,7 +273,9 @@ pub fn run_once(
                             _ => Severity::Info,
                         };
                         let builder = base_ssh_event(&auth.user, &auth.ip, base_sev);
-                        let ip_is_new = state.ssh_seen.is_first(&auth.ip);
+                        // Local events (sudo/su) have no source IP — never
+                        // first-seen-escalate the empty string.
+                        let ip_is_new = !auth.ip.is_empty() && state.ssh_seen.is_first(&auth.ip);
                         let sev = builder.suggest_severity(ip_is_new);
                         let kind = match auth.kind {
                             AuthKind::SshLogin => EventKind::SshLogin,
@@ -579,6 +581,31 @@ mod tests {
         // root login from a first-seen IP escalates to Critical
         let root = evs.iter().find(|e| e.kind == EventKind::RootLogin).unwrap();
         assert_eq!(root.severity, wt_common::Severity::Critical);
+    }
+
+    #[test]
+    fn local_sudo_does_not_escalate_on_first_use() {
+        let mut state = AgentState::for_tests();
+        let runner = FakeSys {
+            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sudo","MESSAGE":"deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/systemctl restart nginx"}"#.to_string(),
+        };
+        let cfg = Config::default();
+        let mut deduper = Deduper::new(300);
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_002_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        let sudo = evs.iter().find(|e| e.kind == EventKind::SudoUsed).unwrap();
+        assert_eq!(sudo.severity, wt_common::Severity::Info);
     }
 
     struct FakeSys {
