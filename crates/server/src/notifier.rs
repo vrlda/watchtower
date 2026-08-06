@@ -73,7 +73,11 @@ mod tests {
         let cfg = crate::notify::NotifyConfig {
             webhook_url: format!("http://{}", addr),
             slack_url: String::new(),
-            routing: crate::notify::default_routing(),
+            telegram_token: None,
+            routing: std::collections::HashMap::from([
+                ("Critical".into(), vec!["webhook".into()]),
+                ("Warning".into(), vec!["webhook".into()]),
+            ]),
         };
         let delivered = Arc::new(AtomicUsize::new(0));
         let d2 = delivered.clone();

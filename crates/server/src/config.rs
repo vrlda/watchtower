@@ -116,7 +116,7 @@ impl Default for ServerConfig {
 }
 
 pub fn load(path: &PathBuf) -> ServerConfig {
-    match std::fs::read_to_string(path) {
+    let mut cfg = match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
             eprintln!("invalid config {}: {}; using defaults", path.display(), e);
             ServerConfig::default()
@@ -125,7 +125,12 @@ pub fn load(path: &PathBuf) -> ServerConfig {
             eprintln!("no config at {} ({}); using defaults", path.display(), e);
             ServerConfig::default()
         }
+    };
+    // one-line Telegram setup: token from the environment
+    if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
+        cfg.notify.telegram_token = Some(token);
     }
+    cfg
 }
 
 #[cfg(test)]

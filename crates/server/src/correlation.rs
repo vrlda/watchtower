@@ -1073,7 +1073,11 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
             notify: crate::notify::NotifyConfig {
                 webhook_url: format!("http://{}", addr),
                 slack_url: String::new(),
-                routing: crate::notify::default_routing(),
+                telegram_token: None,
+                routing: std::collections::HashMap::from([
+                    ("Critical".into(), vec!["webhook".into()]),
+                    ("Warning".into(), vec!["webhook".into()]),
+                ]),
             },
             ..Default::default()
         };

@@ -37,6 +37,9 @@ no capabilities). Hosts self-register on the first heartbeat.
     cp watchtower-server.service /etc/systemd/system/
     systemctl daemon-reload && systemctl enable --now watchtower-server
 
+    # optional: Telegram notifications (token from the environment)
+    TELEGRAM_BOT_TOKEN=<bot token> watchtower-server --config server.toml
+
 The UI serves at http://127.0.0.1:8787/ (token prompt on first load).
 Expose the listener only where the UI + agents can reach it (default localhost).
 

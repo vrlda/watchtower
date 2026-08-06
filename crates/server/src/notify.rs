@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-/// Per-severity channel routing. Defaults: Critical → webhook+slack,
-/// Warning → slack, Info → none (timeline only).
+/// Per-severity channel routing. Defaults: Critical → telegram,
+/// Warning → telegram, Info → none (timeline only).
 pub fn default_routing() -> HashMap<String, Vec<String>> {
     let mut m = HashMap::new();
-    m.insert("Critical".into(), vec!["webhook".into(), "slack".into()]);
-    m.insert("Warning".into(), vec!["slack".into()]);
+    m.insert("Critical".into(), vec!["telegram".into()]);
+    m.insert("Warning".into(), vec!["telegram".into()]);
     m.insert("Info".into(), vec![]);
     m
 }
@@ -17,6 +17,7 @@ pub fn default_routing() -> HashMap<String, Vec<String>> {
 pub struct NotifyConfig {
     pub webhook_url: String,
     pub slack_url: String,
+    pub telegram_token: Option<String>,
     pub routing: HashMap<String, Vec<String>>,
 }
 
@@ -25,6 +26,7 @@ impl Default for NotifyConfig {
         NotifyConfig {
             webhook_url: String::new(),
             slack_url: String::new(),
+            telegram_token: None,
             routing: default_routing(),
         }
     }
@@ -101,6 +103,126 @@ pub fn slack_payload(incident_json: &serde_json::Value, ui_base_url: &str) -> St
     .unwrap_or_else(|_| "{}".into())
 }
 
+// ---------- Telegram ----------
+
+/// Telegram bot delivery. Token comes from the TELEGRAM_BOT_TOKEN env line
+/// (injected at config load); the chat id auto-resolves from the bot's
+/// updates — the operator messages the bot once (e.g. /start) and the chat
+/// is remembered.
+pub struct TelegramClient {
+    pub token: String,
+    pub chat_id: std::sync::Mutex<Option<i64>>,
+}
+
+impl TelegramClient {
+    pub fn new(token: String) -> Self {
+        TelegramClient {
+            token,
+            chat_id: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+pub const TELEGRAM_API: &str = "https://api.telegram.org";
+
+/// Incident → Telegram message text (plain text, no markdown).
+pub fn telegram_payload(incident_json: &serde_json::Value, ui_base_url: &str) -> String {
+    let sev = incident_json["severity"].as_str().unwrap_or("?");
+    let mut lines = vec![format!(
+        "[{}] {}",
+        sev.to_uppercase(),
+        incident_json["headline"].as_str().unwrap_or("")
+    )];
+    if let Some(cause) = incident_json["cause"].as_str() {
+        if !cause.is_empty() {
+            lines.push(cause.to_string());
+        }
+    }
+    if let Some(tl) = incident_json["timeline"].as_array() {
+        for e in tl {
+            lines.push(format!(
+                " - {} — {} ({})",
+                format_ts(e["ts"].as_i64().unwrap_or(0)),
+                e["summary"].as_str().unwrap_or(""),
+                e["kind"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    if let Some(actions) = incident_json["actions"].as_array() {
+        for a in actions {
+            lines.push(format!("> {}", a.as_str().unwrap_or("")));
+        }
+    }
+    lines.push(format!(
+        "{}/#/incidents/{}",
+        ui_base_url.trim_end_matches('/'),
+        incident_json["id"].as_str().unwrap_or("")
+    ));
+    lines.join("\n")
+}
+
+/// GET the bot's updates; return the first chat id found.
+pub fn resolve_chat_id(api_base: &str, token: &str) -> Result<Option<i64>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let url = format!("{}/bot{}/getUpdates", api_base.trim_end_matches('/'), token);
+    let body: serde_json::Value = agent
+        .get(&url)
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    if body["ok"] != true {
+        return Ok(None);
+    }
+    Ok(body["result"].as_array().and_then(|updates| {
+        updates.iter().find_map(|u| {
+            u["message"]["chat"]["id"]
+                .as_i64()
+                .or_else(|| u["my_chat_member"]["chat"]["id"].as_i64())
+        })
+    }))
+}
+
+/// Send a text message to the bot's chat, resolving the chat if unknown.
+/// Ok(false) = no chat registered yet (message the bot once).
+pub fn telegram_send(client: &TelegramClient, api_base: &str, text: &str) -> Result<bool, String> {
+    let chat = match *client.chat_id.lock().unwrap() {
+        Some(c) => c,
+        None => match resolve_chat_id(api_base, &client.token)? {
+            Some(c) => {
+                *client.chat_id.lock().unwrap() = Some(c);
+                c
+            }
+            None => return Ok(false),
+        },
+    };
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let url = format!(
+        "{}/bot{}/sendMessage",
+        api_base.trim_end_matches('/'),
+        client.token
+    );
+    let resp = agent
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&serde_json::json!({ "chat_id": chat, "text": text }).to_string())
+        .map_err(|e| e.to_string())?;
+    Ok((200..300).contains(&resp.status()))
+}
+
+/// Module-level client built once from the configured token. Token changes
+/// require a restart (documented).
+static TELEGRAM: std::sync::OnceLock<TelegramClient> = std::sync::OnceLock::new();
+
+pub fn telegram_client(token: Option<&str>) -> Option<&'static TelegramClient> {
+    let token = token?;
+    Some(TELEGRAM.get_or_init(|| TelegramClient::new(token.to_string())))
+}
+
 /// Timestamp → "YYYY-MM-DD HH:MM:SS" (UTC). No chrono — civil-from-days.
 pub fn format_ts(ts: i64) -> String {
     let secs = ts / 1000;
@@ -149,6 +271,27 @@ pub async fn notify_incident(
     let webhook = webhook_payload(incident_json, ui_base_url);
     let slack = slack_payload(incident_json, ui_base_url);
     for channel in channels_for(cfg, severity) {
+        if channel == "telegram" {
+            if let Some(client) = telegram_client(cfg.telegram_token.as_deref()) {
+                let text = telegram_payload(incident_json, ui_base_url);
+                let ok =
+                    tokio::task::spawn_blocking(move || telegram_send(client, TELEGRAM_API, &text))
+                        .await
+                        .unwrap_or_else(|_| Err("join failed".into()));
+                match ok {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!("telegram: no chat registered yet — message the bot once");
+                    }
+                    Err(e) => {
+                        eprintln!("telegram send failed: {}", e);
+                        // best-effort: no retry-queue push (empty-url items would
+                        // retry pointlessly); the next incident retries naturally
+                    }
+                }
+            }
+            continue;
+        }
         let (url, payload) = match channel.as_str() {
             "webhook" => (cfg.webhook_url.clone(), webhook.clone()),
             "slack" => (cfg.slack_url.clone(), slack.clone()),
@@ -277,6 +420,7 @@ mod tests {
     use super::*;
     use crate::api_incidents::incident_json;
     use crate::incidents::{Incident, IncidentEvent, IncidentStatus};
+    use std::io::{Read, Write};
 
     fn sample_incident() -> Incident {
         Incident {
@@ -344,14 +488,13 @@ mod tests {
         let cfg = NotifyConfig {
             webhook_url: "http://w".into(),
             slack_url: "http://s".into(),
+            telegram_token: None,
             routing: default_routing(),
         };
         let c = channels_for(&cfg, "Critical");
-        assert!(c.iter().any(|s| s == "webhook"));
-        assert!(c.iter().any(|s| s == "slack"));
+        assert_eq!(c, vec!["telegram".to_string()]);
         let c = channels_for(&cfg, "Warning");
-        assert!(!c.iter().any(|s| s == "webhook"));
-        assert!(c.iter().any(|s| s == "slack"));
+        assert_eq!(c, vec!["telegram".to_string()]);
         let c = channels_for(&cfg, "Info");
         assert!(c.is_empty());
     }
@@ -400,5 +543,121 @@ mod tests {
         let text = v["attachments"][0]["title"].as_str().unwrap();
         assert!(text.contains("&lt;a&amp;b&gt;"), "escaped: {}", text);
         assert!(!text.contains("<a&b>"));
+    }
+
+    #[test]
+    fn telegram_payload_has_incident_anatomy() {
+        let text = telegram_payload(&incident_json(&sample_incident()), "http://ui");
+        assert!(text.contains("[CRITICAL]"));
+        assert!(text.contains("myapp.service became unhealthy"));
+        assert!(text.contains("configuration change"));
+        assert!(text.contains("myapp failed"));
+        assert!(text.contains("http://ui/#/incidents/inc-1"));
+        assert!(text.contains("Roll back the config"));
+    }
+
+    #[test]
+    fn default_routing_is_single_telegram_channel() {
+        let r = default_routing();
+        assert_eq!(r.get("Critical").unwrap(), &vec!["telegram".to_string()]);
+        assert_eq!(r.get("Warning").unwrap(), &vec!["telegram".to_string()]);
+        assert!(r.get("Info").unwrap().is_empty());
+    }
+
+    #[test]
+    fn telegram_send_posts_to_bot_api() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(5000)))
+                .unwrap();
+            let mut buf = [0u8; 65536];
+            let mut got = 0;
+            let mut total = usize::MAX; // full request: headers + body
+            loop {
+                if got >= total {
+                    break;
+                }
+                match stream.read(&mut buf[got..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        got += n;
+                        if total == usize::MAX {
+                            if let Some(end) = buf[..got].windows(4).position(|w| w == b"\r\n\r\n")
+                            {
+                                let head_end = end + 4;
+                                let head = String::from_utf8_lossy(&buf[..end]);
+                                let clen = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        let (name, value) = l.split_once(':')?;
+                                        name.trim()
+                                            .eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().unwrap_or(0))
+                                    })
+                                    .unwrap_or(0);
+                                total = head_end + clen;
+                            }
+                        }
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&buf[..got]).into_owned();
+            let body = "{\"ok\":true,\"result\":{}}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            req
+        });
+        let base = format!("http://{}", addr);
+        let client = TelegramClient::new("test-token".into());
+        *client.chat_id.lock().unwrap() = Some(42); // pre-seeded (auto-resolve covered elsewhere)
+        let ok = telegram_send(&client, &base, "hello").unwrap();
+        assert!(ok);
+        let req = handle.join().unwrap();
+        assert!(req.contains("/bottest-token/sendMessage"));
+        assert!(req.contains("chat_id"));
+        assert!(req.contains("hello"));
+    }
+
+    #[test]
+    fn telegram_get_updates_resolves_chat_id() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(5000)))
+                .unwrap();
+            let mut buf = [0u8; 65536];
+            let mut got = 0;
+            loop {
+                match stream.read(&mut buf[got..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        got += n;
+                        if buf[..got].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break; // full request read (headers terminator)
+                        }
+                    }
+                }
+            }
+            let body = r#"{"ok":true,"result":[{"update_id":1,"message":{"chat":{"id":12345}}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+        let base = format!("http://{}", addr);
+        let chat = resolve_chat_id(&base, "tok").unwrap();
+        assert_eq!(chat, Some(12345));
+        handle.join().unwrap();
     }
 }

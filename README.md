@@ -51,6 +51,14 @@ Control plane core (`watchtower-server`):
 
 Incidents, correlation, notifications: M4.
 
+### Telegram notifications
+
+    TELEGRAM_BOT_TOKEN=<bot token> watchtower-server --config server.toml
+
+Message the bot once (e.g. /start) — the chat is auto-discovered. All
+Critical and Warning incidents notify to that single channel by default
+(routing is editable in server.toml `[notify.routing]`).
+
 ## Install (Linux)
 
     # release build with checksum:
