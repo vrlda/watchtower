@@ -2,6 +2,7 @@ use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use crate::api_incidents;
 use crate::auth::{require_token, AuthToken};
 use crate::config::ServerConfig;
 use crate::correlation::{merged_rules, Rule};
@@ -68,6 +69,12 @@ pub async fn build_app(state: AppState) -> Router {
         .route("/v1/heartbeat", post(hosts::heartbeat))
         .route("/v1/hosts", get(hosts::list_hosts))
         .route("/v1/events", get(events::list_events))
+        .route("/v1/incidents", get(api_incidents::list_incidents))
+        .route("/v1/incidents/{id}", get(api_incidents::get_incident))
+        .route(
+            "/v1/incidents/{id}/{action}",
+            post(api_incidents::set_status_route),
+        )
         .layer(middleware::from_fn_with_state(auth_token, require_token))
         .fallback_service(ServeDir::new(crate::ui_dir()))
         .with_state(state)

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod api_incidents;
 pub mod app;
 pub mod auth;
 pub mod config;

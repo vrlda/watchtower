@@ -247,6 +247,63 @@ pub async fn set_status(
     Ok(res.rows_affected() > 0)
 }
 
+/// List summaries (no timelines), newest first.
+pub async fn list(
+    pool: &sqlx::SqlitePool,
+    status: &Option<String>,
+    severity: &Option<String>,
+    host: Option<&str>,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64, i64, Option<i64>, Option<i64>)>(
+        "SELECT id, key, host_id, severity, headline, status, cause, created_at, updated_at, acked_at, resolved_at
+         FROM incidents
+         WHERE (?1 IS NULL OR status = ?1)
+           AND (?2 IS NULL OR severity = ?2)
+           AND (?3 IS NULL OR host_id = ?3)
+         ORDER BY created_at DESC
+         LIMIT ?4",
+    )
+    .bind(status.as_deref())
+    .bind(severity.as_deref())
+    .bind(host)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                key,
+                host_id,
+                severity,
+                headline,
+                status,
+                cause,
+                created_at,
+                updated_at,
+                acked_at,
+                resolved_at,
+            )| {
+                serde_json::json!({
+                    "id": id,
+                    "key": key,
+                    "host_id": host_id,
+                    "severity": severity,
+                    "headline": headline,
+                    "status": status,
+                    "cause": cause,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    "acked_at": acked_at,
+                    "resolved_at": resolved_at,
+                })
+            },
+        )
+        .collect())
+}
+
 /// Full incident with timeline, ordered (ts DESC, id) — NEVER arrival order.
 pub async fn fetch_incident(
     pool: &sqlx::SqlitePool,
