@@ -53,10 +53,18 @@ Incidents, correlation, notifications: M4.
 
 ## Install (Linux)
 
-    # from a release build (hosting is post-MVP — use a local build):
+    # release build with checksum:
+    INSTALL_URL=https://.../watchtower-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+      INSTALL_SHA256=<from SHA256SUMS> \
+      SERVER_URL=http://control.example.com TOKEN=secret \
+      sudo sh scripts/install.sh
+
+    # or from a local build:
     WATCHTOWER_BINARY=target/release/watchtower-agent \
       SERVER_URL=http://control.example.com TOKEN=secret \
       sudo sh scripts/install.sh
+
+Build a release: `TARGETS=x86_64-unknown-linux-gnu sh scripts/release.sh`
 
 The installer: installs the binary, writes /etc/watchtower/agent.toml,
 installs + starts the systemd unit, and prints the discovery checklist.

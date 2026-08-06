@@ -116,10 +116,11 @@ impl ContainerTracker {
                     });
                     self.restarting_count.remove(&c.name); // episode resets
                 }
-            }
-            // fast crash loops: the Status "Restarting (N)" counter climbs
-            // even when the sampled state is "running" between attempts
-            if let Some(n) = restart_count(&c.status) {
+            } else if let Some(n) = restart_count(&c.status) {
+                // fast crash loops: the Status "Restarting (N)" counter climbs
+                // even when the sampled state is "running" between attempts
+                // (else-if of the state path: a "restarting" sample must not
+                // count through both paths)
                 let prev_n = self.prev_restart_n.entry(c.name.clone()).or_insert(0);
                 let delta = n.saturating_sub(*prev_n);
                 *prev_n = n;
@@ -145,7 +146,7 @@ impl ContainerTracker {
                         self.prev_restart_n.remove(&c.name);
                     }
                 }
-            } else if c.state != "restarting" {
+            } else {
                 // stable status (e.g. "Up ...") resets the counters
                 self.restarting_count.remove(&c.name);
                 self.prev_restart_n.remove(&c.name);

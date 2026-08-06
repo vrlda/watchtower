@@ -3,6 +3,7 @@
 # Usage:
 #   SERVER_URL=https://control.example.com TOKEN=secret sh install.sh
 #   WATCHTOWER_BINARY=/path/to/watchtower-agent sh install.sh   # local build
+#   INSTALL_URL=<release tarball URL> INSTALL_SHA256=<checksum> sh install.sh
 set -euo pipefail
 
 SERVER_URL="${SERVER_URL:-}"
@@ -24,11 +25,24 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo "==> installing binary"
-if [ -z "$BINARY_SRC" ]; then
-  echo "set WATCHTOWER_BINARY to a local build (release hosting is post-MVP)" >&2
+if [ -n "${INSTALL_URL:-}" ]; then
+  if [ -z "${INSTALL_SHA256:-}" ]; then
+    echo "INSTALL_SHA256 is required when using INSTALL_URL" >&2
+    exit 1
+  fi
+  TMP="$(mktemp)"
+  trap 'rm -f "$TMP"' EXIT
+  echo "downloading $INSTALL_URL"
+  curl -fsSL "$INSTALL_URL" -o "$TMP"
+  echo "$INSTALL_SHA256  $TMP" | shasum -a 256 -c - || { echo "checksum mismatch — aborting" >&2; exit 1; }
+  tar -xzf "$TMP" -C "$INSTALL_DIR"
+  chmod 0755 "$INSTALL_DIR/watchtower-agent" "$INSTALL_DIR/watchtower-server"
+elif [ -n "$BINARY_SRC" ]; then
+  install -m 0755 "$BINARY_SRC" "$INSTALL_DIR/watchtower-agent"
+else
+  echo "set WATCHTOWER_BINARY or INSTALL_URL(+INSTALL_SHA256)" >&2
   exit 1
 fi
-install -m 0755 "$BINARY_SRC" "$INSTALL_DIR/watchtower-agent"
 
 echo "==> creating service user"
 if ! getent passwd watchtower >/dev/null 2>&1; then
