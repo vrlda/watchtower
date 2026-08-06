@@ -76,6 +76,39 @@ pub async fn fetch_events(
         .collect())
 }
 
+/// Raw events since `since_ms`, oldest first — used by the correlation scan.
+pub async fn fetch_events_simple(
+    pool: &sqlx::SqlitePool,
+    since_ms: i64,
+) -> Result<Vec<wt_common::AgentEvent>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String, i64, String, String, String, String, String, String)>(
+        "SELECT id, ts, host_id, key, kind, severity, summary, evidence_json
+         FROM events WHERE ts >= ?1 ORDER BY ts ASC, id",
+    )
+    .bind(since_ms)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(
+            |(id, ts, host_id, key, kind, severity, summary, evidence_json)| {
+                let kind = serde_json::from_str(&format!("\"{}\"", kind)).ok()?;
+                let severity = serde_json::from_str(&format!("\"{}\"", severity)).ok()?;
+                Some(wt_common::AgentEvent {
+                    id,
+                    ts,
+                    host_id,
+                    key,
+                    kind,
+                    severity,
+                    summary,
+                    evidence: serde_json::from_str(&evidence_json).unwrap_or_default(),
+                })
+            },
+        )
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

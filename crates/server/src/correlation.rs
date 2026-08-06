@@ -1,9 +1,9 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wt_common::{AgentEvent, EventKind, Severity};
 
 /// One correlation rule: a trigger kind plus supporting kinds within a
 /// sliding window per host.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     pub id: String,
     pub trigger: EventKind,
@@ -21,6 +21,11 @@ pub struct Rule {
     pub cause: String,
     #[serde(default)]
     pub actions: Vec<String>,
+    /// Kinds that join the timeline when present but do NOT count toward
+    /// min_supporting (evidence only — e.g. a probe failure riding along
+    /// with a config-change outage must not trigger the config rule alone).
+    #[serde(default)]
+    pub absorb_only: Vec<EventKind>,
     /// The fallback rule matches no trigger; handled separately.
     #[serde(skip)]
     pub is_fallback: bool,
@@ -57,8 +62,10 @@ pub fn default_rules() -> Vec<Rule> {
                 EventKind::SudoUsed,
                 EventKind::ServiceRestarted,
                 EventKind::CpuSpike, // absorbed INTO the incident so the demo yields one notification
-                EventKind::HostUnreachable, // probe failure joins the outage incident, not a second one
             ],
+            // probe failure rides along as evidence; it alone must not
+            // satisfy min_supporting and open a config-change incident
+            absorb_only: vec![EventKind::HostUnreachable],
             min_supporting: 1,
             window_secs: 300,
             cooldown_secs: 600,
@@ -88,6 +95,7 @@ pub fn default_rules() -> Vec<Rule> {
                 "Block the source IP at the firewall".into(),
                 "Check for successful logins from the same source".into(),
             ],
+            absorb_only: vec![],
             is_fallback: false,
         },
         Rule {
@@ -97,10 +105,13 @@ pub fn default_rules() -> Vec<Rule> {
             min_supporting: 0,
             window_secs: 300,
             cooldown_secs: 600,
-            severity: Severity::Critical,
+            // Warning floor: the agent escalates to Critical on a first-seen
+            // IP; the incident severity derives from the matched events.
+            severity: Severity::Warning,
             headline: "Root access on {host}".into(),
             cause: "A login as root was recorded.".into(),
             actions: vec!["Verify the session was authorized".into()],
+            absorb_only: vec![],
             is_fallback: false,
         },
         Rule {
@@ -114,6 +125,7 @@ pub fn default_rules() -> Vec<Rule> {
             headline: "{host} is unreachable".into(),
             cause: "External probes failed consecutively.".into(),
             actions: vec!["Check power and network".into()],
+            absorb_only: vec![],
             is_fallback: false,
         },
         Rule {
@@ -127,6 +139,7 @@ pub fn default_rules() -> Vec<Rule> {
             headline: String::new(),
             cause: String::new(),
             actions: vec![],
+            absorb_only: vec![],
             is_fallback: true,
         },
     ]
@@ -154,7 +167,11 @@ pub fn match_rule(
     let trigger = in_window.iter().find(|e| e.kind == rule.trigger)?;
     let supporting_count = in_window
         .iter()
-        .filter(|e| e.kind != rule.trigger && rule.supporting.contains(&e.kind))
+        .filter(|e| {
+            e.kind != rule.trigger
+                && rule.supporting.contains(&e.kind)
+                && !rule.absorb_only.contains(&e.kind)
+        })
         .count();
     if (supporting_count as u32) < rule.min_supporting {
         return None;
@@ -172,6 +189,19 @@ pub fn fill_template(tpl: &str, host: &str, service: Option<&str>) -> String {
         .replace("{service}", service.unwrap_or("a service"))
 }
 
+/// Incident severity: the rule severity is a floor; the worst matched event
+/// raises it (e.g. root_login: the agent emits Warning on a known IP and
+/// Critical on a first-seen IP — the incident must reflect that).
+fn incident_severity(rule: &Rule, m: &RuleMatch) -> String {
+    let mut sev = rule.severity;
+    for e in &m.events {
+        if e.severity > sev {
+            sev = e.severity;
+        }
+    }
+    crate::ingest::severity_wire(sev)
+}
+
 /// Assemble an incident draft from a rule match.
 pub fn assemble(rule: &Rule, m: &RuleMatch, host: &str) -> IncidentDraft {
     let service = m.service.as_deref();
@@ -179,7 +209,7 @@ pub fn assemble(rule: &Rule, m: &RuleMatch, host: &str) -> IncidentDraft {
     IncidentDraft {
         key: format!("rule:{}:{}", rule.id, host),
         host_id: host.into(),
-        severity: crate::ingest::severity_wire(rule.severity),
+        severity: incident_severity(rule, m),
         headline: fill_template(&rule.headline, host, service),
         cause: fill_template(&rule.cause, host, service).replace("{window}", &window.to_string()),
         actions: rule.actions.clone(),
@@ -229,6 +259,153 @@ pub fn fallback_incidents(events: &[AgentEvent], _now: i64, host: &str) -> Vec<I
         });
     }
     out
+}
+
+/// Merge configured rules over the built-in defaults (override by id).
+pub fn merged_rules(cfg_rules: &[Rule]) -> Vec<Rule> {
+    let mut rules = default_rules();
+    for r in cfg_rules {
+        if let Some(slot) = rules.iter_mut().find(|x| x.id == r.id) {
+            *slot = r.clone();
+        } else {
+            rules.push(r.clone());
+        }
+    }
+    rules
+}
+
+use crate::incidents::{self, Incident};
+
+/// Scan recent events, run rules + fallback, absorb or create incidents.
+/// Returns incidents that CHANGED (new or gained new events) — the notifier
+/// trigger. Cooldown applies to BOTH the rule pass and the fallback pass.
+pub async fn scan_and_absorb(
+    pool: &sqlx::SqlitePool,
+    rules: &[Rule],
+    now: i64,
+) -> Result<Vec<Incident>, sqlx::Error> {
+    let max_window = rules.iter().map(|r| r.window_secs).max().unwrap_or(300) * 1000;
+    let since = now - max_window;
+    let events = crate::events::fetch_events_simple(pool, since).await?;
+    let mut by_host: std::collections::HashMap<String, Vec<AgentEvent>> = Default::default();
+    for e in events {
+        by_host.entry(e.host_id.clone()).or_default().push(e);
+    }
+    let mut changed = Vec::new();
+
+    for (host, host_events) in by_host {
+        let mut matched_event_ids: std::collections::HashSet<String> = Default::default();
+        // rule pass (declared order; earlier rules claim events first)
+        for rule in rules {
+            if rule.is_fallback {
+                continue;
+            }
+            let Some(m) = match_rule(rule, &host_events, now, &host, &matched_event_ids) else {
+                continue;
+            };
+            let draft = assemble(rule, &m, &host);
+            // claim first: cooldown-suppressed events must NOT re-open as
+            // fallback incidents (they belong to the suppressed key)
+            for e in &m.events {
+                matched_event_ids.insert(e.id.clone());
+            }
+            // cooldown: a resolved incident with this key blocks re-open
+            if recently_resolved(pool, &draft.key, now, rule.cooldown_secs * 1000).await? {
+                continue;
+            }
+            let inc = incidents::create_incident(
+                pool,
+                &draft.key,
+                &draft.host_id,
+                &draft.severity,
+                &draft.headline,
+                &draft.cause,
+                &draft.actions,
+                &draft.affected,
+            )
+            .await?;
+            let new_links = incidents::link_events(pool, &inc.id, &draft.events).await?;
+            if new_links > 0 {
+                incidents::touch_incident(pool, &inc.id).await?;
+                let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
+                changed.push(inc);
+            }
+        }
+        // fallback pass: Warning+ events NOT matched by any rule
+        let unmatched: Vec<AgentEvent> = host_events
+            .iter()
+            .filter(|e| !matched_event_ids.contains(&e.id))
+            .cloned()
+            .collect();
+        for draft in fallback_incidents(&unmatched, now, &host) {
+            if let Some(open) = incidents::find_open_by_key(pool, &draft.key).await? {
+                let new_links = incidents::link_events(pool, &open.id, &draft.events).await?;
+                if new_links > 0 {
+                    incidents::touch_incident(pool, &open.id).await?;
+                    let inc = incidents::fetch_incident(pool, &open.id).await?.unwrap();
+                    changed.push(inc);
+                }
+            } else if !recently_resolved(pool, &draft.key, now, 300_000).await? {
+                let inc = incidents::create_incident(
+                    pool,
+                    &draft.key,
+                    &draft.host_id,
+                    &draft.severity,
+                    &draft.headline,
+                    &draft.cause,
+                    &draft.actions,
+                    &draft.affected,
+                )
+                .await?;
+                incidents::link_events(pool, &inc.id, &draft.events).await?;
+                let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
+                changed.push(inc);
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// True when a resolved incident with this key was resolved less than
+/// `cooldown_ms` ago.
+pub async fn recently_resolved(
+    pool: &sqlx::SqlitePool,
+    key: &str,
+    now: i64,
+    cooldown_ms: i64,
+) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query_as::<_, (Option<i64>,)>(
+        "SELECT resolved_at FROM incidents WHERE key = ?1 AND status = 'resolved' ORDER BY resolved_at DESC LIMIT 1",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match row {
+        Some((Some(resolved_at),)) => now - resolved_at < cooldown_ms,
+        _ => false,
+    })
+}
+
+/// Spawn the correlation loop: scan every interval, notify on changes
+/// (notify wiring lands in Task 8; log for now).
+pub fn spawn_runner(state: crate::app::AppState) {
+    let interval = state.cfg.scan_interval_secs.max(5);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval as u64));
+        ticker.tick().await; // skip immediate
+        loop {
+            ticker.tick().await;
+            let now = crate::ingest::now_ms();
+            match scan_and_absorb(&state.pool, &state.rules, now).await {
+                Ok(changed) => {
+                    for inc in &changed {
+                        eprintln!("incident {}: {} [{}]", inc.id, inc.headline, inc.severity);
+                    }
+                }
+                Err(e) => eprintln!("correlation scan failed: {e}"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -441,6 +618,280 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
         assert!(
             cfg.supporting.contains(&EventKind::CpuSpike),
             "cpu spike absorbed so the demo yields ONE incident"
+        );
+    }
+
+    #[test]
+    fn severity_derives_from_matched_events() {
+        let rule: Rule = toml::from_str(CFG_RULE).unwrap(); // Critical
+        let events = vec![
+            ev(
+                "e-1",
+                999_999_700_000,
+                EventKind::FileChanged,
+                Severity::Warning,
+                "fim:x",
+            ),
+            ev(
+                "e-2",
+                999_999_800_000,
+                EventKind::ServiceFailed,
+                Severity::Critical,
+                "svc:myapp.service",
+            ),
+        ];
+        let m = match_rule(&rule, &events, 1_000_000_000_000, "h-1", &no_exclude()).unwrap();
+        let a = assemble(&rule, &m, "h-1");
+        assert_eq!(a.severity, "Critical");
+        // root_login: rule Warning, a Warning-only root login stays Warning
+        let root_rule = default_rules()
+            .into_iter()
+            .find(|r| r.id == "root_login")
+            .unwrap();
+        let events = vec![
+            ev(
+                "e-1",
+                999_999_700_000,
+                EventKind::SshLogin,
+                Severity::Info,
+                "ssh:login:ops",
+            ),
+            ev(
+                "e-2",
+                999_999_800_000,
+                EventKind::RootLogin,
+                Severity::Warning,
+                "ssh:login:root",
+            ),
+        ];
+        let m = match_rule(&root_rule, &events, 1_000_000_000_000, "h-1", &no_exclude()).unwrap();
+        let a = assemble(&root_rule, &m, "h-1");
+        assert_eq!(a.severity, "Warning", "known-IP root login stays Warning");
+        // first-seen root login: the agent's Critical raises the incident
+        let events = vec![
+            ev(
+                "e-1",
+                999_999_700_000,
+                EventKind::SshLogin,
+                Severity::Info,
+                "ssh:login:ops",
+            ),
+            ev(
+                "e-2",
+                999_999_800_000,
+                EventKind::RootLogin,
+                Severity::Critical,
+                "ssh:login:root",
+            ),
+        ];
+        let m = match_rule(&root_rule, &events, 1_000_000_000_000, "h-1", &no_exclude()).unwrap();
+        let a = assemble(&root_rule, &m, "h-1");
+        assert_eq!(
+            a.severity, "Critical",
+            "first-seen root login escalates to Critical"
+        );
+    }
+
+    #[test]
+    fn absorb_only_does_not_satisfy_min_supporting() {
+        let rule = default_rules()
+            .into_iter()
+            .find(|r| r.id == "config_change_outage")
+            .unwrap();
+        let events = vec![
+            ev(
+                "e-1",
+                999_999_800_000,
+                EventKind::HostUnreachable,
+                Severity::Critical,
+                "uptime:https://api",
+            ),
+            ev(
+                "e-2",
+                999_999_850_000,
+                EventKind::ServiceFailed,
+                Severity::Critical,
+                "svc:myapp.service",
+            ),
+        ];
+        // HostUnreachable present but absorb-only → no supporting → no match
+        assert!(match_rule(&rule, &events, 1_000_000_000_000, "h-1", &no_exclude()).is_none());
+        // with a FileChanged it matches AND absorbs the probe event
+        let events = vec![
+            ev(
+                "e-1",
+                999_999_700_000,
+                EventKind::FileChanged,
+                Severity::Warning,
+                "fim:x",
+            ),
+            ev(
+                "e-2",
+                999_999_800_000,
+                EventKind::HostUnreachable,
+                Severity::Critical,
+                "uptime:https://api",
+            ),
+            ev(
+                "e-3",
+                999_999_850_000,
+                EventKind::ServiceFailed,
+                Severity::Critical,
+                "svc:myapp.service",
+            ),
+        ];
+        let m = match_rule(&rule, &events, 1_000_000_000_000, "h-1", &no_exclude()).unwrap();
+        assert!(
+            m.events
+                .iter()
+                .any(|e| e.kind == EventKind::HostUnreachable),
+            "absorbed into the timeline"
+        );
+    }
+
+    async fn pool() -> sqlx::SqlitePool {
+        let p = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::init_schema(&p).await.unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn engine_scan_creates_one_incident_for_demo_sequence() {
+        let p = pool().await;
+        // demo scenario timeline (product spec §7), within one window
+        let demo = [
+            (
+                "e-ssh",
+                999_999_750_000i64,
+                EventKind::SshLogin,
+                Severity::Warning,
+                "ssh:login:deploy",
+            ),
+            (
+                "e-sudo",
+                999_999_780_000,
+                EventKind::SudoUsed,
+                Severity::Info,
+                "sudo:deploy",
+            ),
+            (
+                "e-fim",
+                999_999_800_000,
+                EventKind::FileChanged,
+                Severity::Warning,
+                "fim:/etc/myapp/config.yml",
+            ),
+            (
+                "e-restart",
+                999_999_830_000,
+                EventKind::ServiceRestarted,
+                Severity::Info,
+                "svc:myapp.service",
+            ),
+            (
+                "e-fail",
+                999_999_860_000,
+                EventKind::ServiceFailed,
+                Severity::Critical,
+                "svc:myapp.service",
+            ),
+            (
+                "e-cpu",
+                999_999_900_000,
+                EventKind::CpuSpike,
+                Severity::Warning,
+                "cpu:usage",
+            ),
+            (
+                "e-unreach",
+                999_999_950_000,
+                EventKind::HostUnreachable,
+                Severity::Critical,
+                "uptime:https://api.example.com",
+            ),
+        ];
+        let events: Vec<AgentEvent> = demo
+            .iter()
+            .map(|(id, ts, kind, sev, key)| AgentEvent {
+                id: id.to_string(),
+                ts: *ts,
+                host_id: "h-1".into(),
+                key: key.to_string(),
+                kind: *kind,
+                severity: *sev,
+                summary: format!("{} {:?}", id, kind),
+                evidence: vec![],
+            })
+            .collect();
+        crate::ingest::store_events(&p, &events).await.unwrap();
+        let rules = default_rules();
+        let incidents = scan_and_absorb(&p, &rules, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            incidents.len(),
+            1,
+            "exactly ONE incident for the demo sequence"
+        );
+        assert_eq!(incidents[0].key, "rule:config_change_outage:h-1");
+        assert_eq!(incidents[0].severity, "Critical");
+        assert!(
+            incidents[0].timeline.len() >= 5,
+            "timeline has the correlated events"
+        );
+        // HostUnreachable absorbed as evidence; the cpu spike too; no fallback incidents
+        assert!(incidents[0].timeline.iter().any(|e| e.kind == "CpuSpike"));
+        assert!(incidents[0]
+            .timeline
+            .iter()
+            .any(|e| e.kind == "HostUnreachable"));
+    }
+
+    #[tokio::test]
+    async fn absorb_while_open_and_cooldown_after_resolve() {
+        let p = pool().await;
+        let rules = default_rules();
+        let e1 = ev(
+            "e-1",
+            999_999_800_000,
+            EventKind::ServiceFailed,
+            Severity::Critical,
+            "svc:myapp.service",
+        );
+        let e2 = ev(
+            "e-2",
+            999_999_750_000,
+            EventKind::FileChanged,
+            Severity::Warning,
+            "fim:x",
+        );
+        crate::ingest::store_events(&p, &[e1.clone(), e2.clone()])
+            .await
+            .unwrap();
+        let incs = scan_and_absorb(&p, &rules, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(incs.len(), 1);
+        let id = incs[0].id.clone();
+        // same events re-scanned → absorbed, no new incident, no churn
+        let incs = scan_and_absorb(&p, &rules, 1_000_000_010_000)
+            .await
+            .unwrap();
+        assert_eq!(incs.len(), 0, "absorb is a no-op — nothing new to report");
+        // resolve, then re-scan within cooldown → nothing (BOTH passes check cooldown)
+        crate::incidents::set_status(&p, &id, crate::incidents::IncidentStatus::Resolved)
+            .await
+            .unwrap();
+        let incs = scan_and_absorb(&p, &rules, 1_000_000_020_000)
+            .await
+            .unwrap();
+        assert!(
+            incs.is_empty(),
+            "cooldown suppresses re-open (rule AND fallback passes)"
         );
     }
 }

@@ -16,6 +16,8 @@ struct ServerConfigToml {
     probe: Vec<ProbeConfig>,
     #[serde(default)]
     probes: Vec<ProbeConfig>,
+    scan_interval_secs: Option<i64>,
+    rules: Option<Vec<crate::correlation::Rule>>,
 }
 
 impl From<ServerConfigToml> for ServerConfig {
@@ -28,6 +30,8 @@ impl From<ServerConfigToml> for ServerConfig {
             db_url: t.db_url.unwrap_or(defaults.db_url),
             auth_token: t.auth_token.unwrap_or(defaults.auth_token),
             probes,
+            scan_interval_secs: t.scan_interval_secs.unwrap_or(defaults.scan_interval_secs),
+            rules: t.rules.unwrap_or_default(),
         }
     }
 }
@@ -46,6 +50,16 @@ pub struct ServerConfig {
     /// External endpoints to probe for reachability. Accepts both
     /// `[[probe]]` and `[[probes]]` TOML keys (alias for docs compatibility).
     pub probes: Vec<ProbeConfig>,
+    /// Correlation scan interval (seconds).
+    #[serde(default = "default_scan_interval")]
+    pub scan_interval_secs: i64,
+    /// Correlation rules; entries override built-in defaults by id.
+    #[serde(default)]
+    pub rules: Vec<crate::correlation::Rule>,
+}
+
+fn default_scan_interval() -> i64 {
+    10
 }
 
 impl Default for ServerConfig {
@@ -55,6 +69,8 @@ impl Default for ServerConfig {
             db_url: "sqlite:///var/lib/watchtower/watchtower.db".into(),
             auth_token: String::new(),
             probes: Vec::new(),
+            scan_interval_secs: default_scan_interval(),
+            rules: Vec::new(),
         }
     }
 }

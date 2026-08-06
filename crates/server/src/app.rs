@@ -4,6 +4,7 @@ use axum::{Json, Router};
 
 use crate::auth::{require_token, AuthToken};
 use crate::config::ServerConfig;
+use crate::correlation::{merged_rules, Rule};
 use crate::db;
 use crate::events;
 use crate::hosts;
@@ -16,6 +17,8 @@ pub struct AppState {
     pub pool: sqlx::SqlitePool,
     pub cfg: ServerConfig,
     pub checker: Checker,
+    /// Effective correlation rules (config merged over built-in defaults).
+    pub rules: Vec<Rule>,
     /// Max request body bytes accepted by ingest. Must fit the agent's
     /// maximum spool file (10 MB) plus envelope — a smaller cap would make
     /// the drain POST 400 and the agent would drop the whole file as
@@ -26,11 +29,13 @@ pub struct AppState {
 impl AppState {
     pub async fn new(pool: sqlx::SqlitePool, cfg: ServerConfig) -> Self {
         db::init_schema(&pool).await.expect("schema init failed");
+        let rules = merged_rules(&cfg.rules);
         let checker = Checker::new();
         AppState {
             pool,
             cfg,
             checker,
+            rules,
             max_body_bytes: crate::ingest::MAX_BODY_BYTES,
         }
     }

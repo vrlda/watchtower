@@ -77,6 +77,11 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_key_open ON incidents (key) WHERE status != 'resolved'",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS incident_events (
             incident_id TEXT NOT NULL,
             event_id    TEXT NOT NULL,
