@@ -50,6 +50,11 @@ chown watchtower:watchtower "$CONFIG_DIR/agent.toml"
 chmod 600 "$CONFIG_DIR/agent.toml"
 
 echo "==> installing systemd unit"
+# supplementary groups: journal + adm always exist; docker only where present
+SUPP_GROUPS="systemd-journal adm"
+if getent group docker >/dev/null 2>&1; then
+  SUPP_GROUPS="$SUPP_GROUPS docker"
+fi
 cat > "/etc/systemd/system/$UNIT_NAME" <<UNIT
 [Unit]
 Description=Watchtower agent
@@ -59,7 +64,7 @@ Wants=network-online.target
 [Service]
 User=watchtower
 Group=watchtower
-SupplementaryGroups=systemd-journal adm docker
+SupplementaryGroups=$SUPP_GROUPS
 ExecStart=$INSTALL_DIR/watchtower-agent run
 Restart=always
 RestartSec=5

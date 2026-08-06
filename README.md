@@ -64,7 +64,10 @@ The host self-registers on the first heartbeat.
 
 The agent runs as the dedicated `watchtower` user with journal/docker group
 access (systemd-journal, adm, docker), no capabilities, and
-`NoNewPrivileges=yes`. Certificate paths under `/etc/ssl/private` need
+`NoNewPrivileges=yes`. On hosts without docker, remove the docker group from
+SupplementaryGroups in the unit (a missing group prevents the unit from
+starting) — the install.sh path handles it automatically.
+Certificate paths under `/etc/ssl/private` need
 group access — set `cert_paths` to readable locations if needed.
 
 ## Known M1 limitations

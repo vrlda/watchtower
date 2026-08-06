@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 User=watchtower
 Group=watchtower
+# NOTE: docker group is included for docker hosts; on docker-less hosts,
+# remove it here or the unit fails to start (missing group = exit 216).
 SupplementaryGroups=systemd-journal adm docker
 ExecStart=/usr/local/bin/watchtower-agent run
 Restart=always
