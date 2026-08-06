@@ -58,6 +58,16 @@ pub fn parse_journal(path_or_text: &str) -> Result<Vec<JournalLine>, String> {
     Ok(out)
 }
 
+/// "Started <unit>." from systemd → the unit name (the ServiceRestarted
+/// signal). Only .service units; "Stopped"/other lines → None.
+pub fn service_start(line: &JournalLine) -> Option<&str> {
+    if line.ident != "systemd" {
+        return None;
+    }
+    let rest = line.message.strip_prefix("Started ")?;
+    rest.strip_suffix('.').filter(|u| u.ends_with(".service"))
+}
+
 /// Poll journalctl for lines with realtime timestamp >= since (unix seconds).
 /// journalctl returns nothing (exit 0) when there are no new entries.
 pub fn read_since(
@@ -106,6 +116,31 @@ mod tests {
         let lines = parse_journal(tmp.to_str().unwrap()).unwrap();
         assert_eq!(lines.len(), 1);
         std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn service_start_detects_systemd_started_lines() {
+        let lines = parse_journal(fixture_path().to_str().unwrap()).unwrap();
+        let started: Vec<&str> = lines.iter().filter_map(service_start).collect();
+        assert!(started.contains(&"myapp.service"), "got {:?}", started);
+    }
+
+    #[test]
+    fn service_start_ignores_other_lines() {
+        let l = JournalLine {
+            ts_ms: 1,
+            ident: "systemd".into(),
+            pid: 0,
+            message: "Stopped myapp.service.".into(),
+        };
+        assert!(service_start(&l).is_none());
+        let l = JournalLine {
+            ts_ms: 1,
+            ident: "sshd".into(),
+            pid: 0,
+            message: "Started something".into(),
+        };
+        assert!(service_start(&l).is_none());
     }
 
     #[test]

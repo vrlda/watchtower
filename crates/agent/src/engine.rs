@@ -311,6 +311,22 @@ pub fn run_once(
                     }
                 }
             }
+            if let Some(unit) = crate::journald::service_start(line) {
+                evs.push(AgentEvent {
+                    id: format!("svcstart-{}-{}", line.ts_ms, unit),
+                    ts: line.ts_ms,
+                    host_id: host_id.into(),
+                    key: format!("svc:{}", unit),
+                    kind: EventKind::ServiceRestarted,
+                    severity: Severity::Info,
+                    summary: format!("{} restarted", unit),
+                    evidence: vec![Evidence {
+                        ts: line.ts_ms,
+                        source: "journald".into(),
+                        detail: line.message.clone(),
+                    }],
+                });
+            }
         }
     }
 
@@ -606,6 +622,35 @@ mod tests {
         );
         let sudo = evs.iter().find(|e| e.kind == EventKind::SudoUsed).unwrap();
         assert_eq!(sudo.severity, wt_common::Severity::Info);
+    }
+
+    #[test]
+    fn run_once_emits_service_restarted() {
+        let mut state = AgentState::for_tests();
+        let runner = FakeSys {
+            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000011000000","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"Started myapp.service."}"#.to_string(),
+        };
+        let cfg = Config::default();
+        let mut deduper = Deduper::new(300);
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_011_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        let ev = evs
+            .iter()
+            .find(|e| e.kind == EventKind::ServiceRestarted)
+            .expect("restart event");
+        assert_eq!(ev.severity, wt_common::Severity::Info);
+        assert_eq!(ev.key, "svc:myapp.service");
     }
 
     struct FakeSys {

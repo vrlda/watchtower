@@ -9,3 +9,5 @@
 {"__REALTIME_TIMESTAMP":"1758000008000000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed password for invalid user root from 203.0.113.7 port 40002 ssh2"}
 {"__REALTIME_TIMESTAMP":"1758000009000000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed keyboard-interactive for deploy from 198.51.100.24 port 51236 ssh2"}
 {"__REALTIME_TIMESTAMP":"1758000010000000","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"pam_unix(sshd:session): session opened for user deploy by (uid=1000)"}
+{"__REALTIME_TIMESTAMP":"1758000011000000","SYSLOG_IDENTIFIER":"systemd","_PID":"1","MESSAGE":"Started myapp.service."}
+{"__REALTIME_TIMESTAMP":"1758000012000000","SYSLOG_IDENTIFIER":"systemd","_PID":"1","MESSAGE":"Stopped myapp.service."}
