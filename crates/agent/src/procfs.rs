@@ -40,49 +40,19 @@ pub fn decode_ipv4(hex: &str) -> String {
 }
 
 /// Decode the 4 little-endian 32-bit words of the hex IPv6 from
-/// /proc/net/tcp6. Each 8-hex-char group is a little-endian u32; the group
-/// renders as two 16-bit words. v4-mapped (::ffff:a.b.c.d) and all-zero
-/// (::) forms are handled explicitly.
+/// /proc/net/tcp6. The kernel prints each network-order word as a LE u32,
+/// so bytes within each 8-hex-char group are reversed. Rendered canonically
+/// via std::net::Ipv6Addr (RFC 5952 compression, ::ffff:a.b.c.d form).
 pub fn decode_ipv6(hex: &str) -> String {
-    let mut groups: Vec<String> = Vec::new();
-    let mut vals: Vec<u32> = Vec::new();
+    let mut bytes = [0u8; 16];
     for g in 0..4 {
         let chunk = &hex[g * 8..g * 8 + 8];
-        let mut v: u32 = 0;
         for (i, c) in chunk.as_bytes().chunks(2).enumerate() {
             let byte = u8::from_str_radix(std::str::from_utf8(c).unwrap_or("00"), 16).unwrap_or(0);
-            v |= (byte as u32) << (8 * i);
-        }
-        vals.push(v);
-        let w_hi = (v >> 16) as u16;
-        let w_lo = (v & 0xffff) as u16;
-        if w_hi == 0 && w_lo == 0 {
-            groups.push("0".into());
-        } else if w_hi == 0 {
-            groups.push(format!("{:x}", w_lo));
-        } else {
-            groups.push(format!("{:x}:{:x}", w_hi, w_lo));
+            bytes[g * 4 + 3 - i] = byte;
         }
     }
-    // v4-mapped: ::ffff:a.b.c.d (group 2 raw hex is "FFFF0000")
-    if vals[0] == 0 && vals[1] == 0 && vals[2] == 0x0000ffff {
-        let q = vals[3];
-        return format!(
-            "::ffff:{}.{}.{}.{}",
-            (q >> 24) & 0xff,
-            (q >> 16) & 0xff,
-            (q >> 8) & 0xff,
-            q & 0xff
-        );
-    }
-    let joined = groups.join(":");
-    if joined == "0:0:0:0" {
-        return "::".into();
-    }
-    if let Some(rest) = joined.strip_prefix("0:0:") {
-        return format!("::{}", rest);
-    }
-    joined
+    std::net::Ipv6Addr::from(bytes).to_string()
 }
 
 /// Parse a /proc/net/tcp or tcp6 file body into entries.
@@ -306,5 +276,21 @@ mod tests {
             decode_ipv6("0000000000000000FFFF00000100007F"),
             "::ffff:127.0.0.1"
         );
+    }
+
+    #[test]
+    fn decodes_ipv6_real_world_addresses() {
+        // 2001:db8::1 (kernel LE-word format)
+        assert_eq!(
+            decode_ipv6("b80d0120000000000000000001000000"),
+            "2001:db8::1"
+        );
+        // 2001:4860:4860::8888 (Google DNS)
+        assert_eq!(
+            decode_ipv6("60480120000060480000000088880000"),
+            "2001:4860:4860::8888"
+        );
+        // fe80::1 (link-local); kernel word "000080FE" = LE u32 of bytes [FE 80 00 00]
+        assert_eq!(decode_ipv6("000080fe000000000000000001000000"), "fe80::1");
     }
 }
