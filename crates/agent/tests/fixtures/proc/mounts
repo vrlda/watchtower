@@ -1,0 +1,6 @@
+/dev/sda1 / ext4 rw,relatime 0 0
+/dev/sda2 /boot ext4 rw,relatime 0 0
+tmpfs /run tmpfs rw,nosuid 0 0
+sysfs /sys sysfs ro,nosuid 0 0
+proc /proc proc rw,nosuid 0 0
+/dev/sdb1 /var/lib/docker ext4 rw,relatime 0 0

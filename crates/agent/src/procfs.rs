@@ -26,6 +26,56 @@ pub struct TcpEntry {
     pub state: String,
 }
 
+/// One mount entry from /proc/mounts (device, mount point, fstype).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mount {
+    pub device: String,
+    pub mount_point: String,
+    pub fstype: String,
+}
+
+/// Parse /proc/mounts; keep only real (non-pseudo) filesystems.
+pub fn parse_mounts(text: &str) -> Vec<Mount> {
+    const PSEUDO: &[&str] = &[
+        "proc",
+        "sysfs",
+        "devtmpfs",
+        "devpts",
+        "cgroup",
+        "cgroup2",
+        "pstore",
+        "securityfs",
+        "debugfs",
+        "tracefs",
+        "bpf",
+        "autofs",
+        "mqueue",
+        "hugetlbfs",
+        "configfs",
+        "fusectl",
+        "binfmt_misc",
+        "rpc_pipefs",
+        "nsfs",
+        "overlay",
+    ];
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        if PSEUDO.contains(&parts[2]) {
+            continue;
+        }
+        out.push(Mount {
+            device: parts[0].to_string(),
+            mount_point: parts[1].replace("\\040", " "),
+            fstype: parts[2].to_string(),
+        });
+    }
+    out
+}
+
 /// Decode the little-endian hex IPv4 from /proc/net/tcp.
 /// "0100007F" → bytes [01 00 00 7F] → reversed → 127.0.0.1
 pub fn decode_ipv4(hex: &str) -> String {
@@ -200,6 +250,11 @@ impl ProcFs {
         let text = self.read("net/tcp6")?;
         Ok(parse_tcp_table(&text, true))
     }
+
+    pub fn mounts(&self) -> Result<Vec<Mount>, String> {
+        let text = self.read("mounts")?;
+        Ok(parse_mounts(&text))
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +320,16 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| e.local_ip == "::" && e.local_port == 9000 && e.state == "ESTABLISHED"));
+    }
+
+    #[test]
+    fn parses_mounts_filtering_pseudo_fs() {
+        let p = ProcFs::new(test_base());
+        let mounts = p.mounts().unwrap();
+        assert!(mounts.iter().any(|m| m.mount_point == "/"));
+        assert!(mounts.iter().any(|m| m.mount_point == "/run"));
+        assert!(!mounts.iter().any(|m| m.mount_point == "/sys"));
+        assert!(!mounts.iter().any(|m| m.mount_point == "/proc"));
     }
 
     #[test]

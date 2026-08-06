@@ -430,6 +430,9 @@ pub fn run_once(
     // netflow sensor
     evs.extend(state.net.observe(procfs, ts, host_id));
 
+    // disk/inode sensor
+    evs.extend(crate::sensors::disk::disk_events(procfs, cfg, ts, host_id));
+
     // docker sensor (fail-open: no docker binary / daemon → nothing)
     if cfg.docker_enabled {
         if let Ok(out) = runners
