@@ -112,10 +112,23 @@ fn main() {
             // since epoch on first start would blow the 10s timeout.
             state.journal_since_ms = now_ms();
             #[cfg(target_os = "linux")]
-            if !cfg.watch_paths.is_empty() {
+            if !cfg.watch_paths.is_empty() || cfg.watch_authorized_keys {
+                let mut watch_paths = cfg.watch_paths.clone();
+                if cfg.watch_authorized_keys {
+                    for pat in ["/root/.ssh/authorized_keys", "/home/*/.ssh/authorized_keys"] {
+                        if let Ok(entries) = glob::glob(pat) {
+                            for e in entries.flatten() {
+                                let p = e.to_string_lossy().into_owned();
+                                if !watch_paths.contains(&p) {
+                                    watch_paths.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
                 let (tx, rx) = std::sync::mpsc::channel();
                 if crate::sensors::fim::spawn_watcher(
-                    cfg.watch_paths
+                    watch_paths
                         .iter()
                         .map(|p| crate::sensors::fim_types::WatchedFile::new(p))
                         .collect(),

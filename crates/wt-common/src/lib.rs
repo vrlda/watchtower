@@ -75,6 +75,12 @@ pub enum EventKind {
     /// Request volume from access logs exceeded the threshold within the
     /// window (Warning).
     RequestRateSpike,
+    /// A user account was created/modified/deleted (Warning).
+    NewUser,
+    /// A package was installed, upgraded, or removed (Info).
+    PackageInstalled,
+    /// Cron or systemd unit files under /etc changed (Warning).
+    PersistenceChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +135,8 @@ pub struct Config {
     /// Files (absolute paths) watched for modification by the FIM sensor.
     #[serde(default)]
     pub watch_paths: Vec<String>,
+    /// Auto-watch authorized_keys files (root + /home/*) for modification.
+    pub watch_authorized_keys: bool,
     /// Regex patterns counted as application errors in journald lines.
     #[serde(default)]
     pub error_patterns: Vec<String>,
@@ -187,6 +195,7 @@ impl Default for Config {
             swap_warn_pct: 50.0,
             spool_dir: "/var/lib/watchtower/spool".into(),
             watch_paths: Vec::new(),
+            watch_authorized_keys: true,
             error_patterns: Vec::new(),
             error_window_secs: 300,
             error_threshold: 10,
@@ -388,5 +397,26 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.scan_threshold, 25);
         assert_eq!(cfg.scan_window_secs, 10);
+    }
+
+    #[test]
+    fn p3t7_kinds_serialize() {
+        for (kind, expected) in [
+            (EventKind::NewUser, "NewUser"),
+            (EventKind::PackageInstalled, "PackageInstalled"),
+            (EventKind::PersistenceChanged, "PersistenceChanged"),
+        ] {
+            let v: serde_json::Value = serde_json::to_value(kind).unwrap();
+            assert_eq!(v, expected);
+        }
+    }
+
+    #[test]
+    fn config_has_p3t7_fields() {
+        let cfg = Config::default();
+        assert!(cfg.watch_authorized_keys);
+        let cfg: Config =
+            toml::from_str("server_url = \"x\"\nwatch_authorized_keys = false\n").unwrap();
+        assert!(!cfg.watch_authorized_keys);
     }
 }

@@ -1,10 +1,14 @@
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::mpsc::Receiver;
 
 use crate::sensors::fim_types::{change_event, FimEvent};
 use crate::sensors::netflow::NetState;
 use crate::sensors::sshauth::{base_ssh_event, classify, AuthKind, BruteForceTracker, SeenIps};
 use wt_common::{AgentEvent, Config, EventKind, Evidence, Severity};
+
+/// Milliseconds between persistence directory scans (cron.d + systemd units).
+const PERSISTENCE_SCAN_MS: i64 = 300_000;
 
 /// Rolling median baseline spike detector. A value is a spike when it exceeds
 /// the median of the last `window` samples by `ratio`x.
@@ -190,6 +194,11 @@ pub struct AgentState {
     pub access_tails: HashMap<String, crate::logs::TailState>,
     /// (poll ts, lines read) pairs within the request-rate window.
     pub request_counts: VecDeque<(i64, u32)>,
+    /// Last persistence directory snapshot (cron.d + systemd units); None
+    /// until the first scan seeds the baseline.
+    pub persistence_snapshot: Option<std::collections::HashMap<String, (i64, u64)>>,
+    /// Last persistence scan time (ms); gates the directory walk.
+    pub persistence_scan: i64,
 }
 
 impl AgentState {
@@ -224,6 +233,8 @@ impl AgentState {
             last_cert_scan: 0,
             access_tails: Default::default(),
             request_counts: Default::default(),
+            persistence_snapshot: None,
+            persistence_scan: 0,
         }
     }
 
@@ -446,6 +457,30 @@ pub fn run_once(
                     }],
                 });
             }
+            if let Some(sig) = crate::sensors::security::classify(line) {
+                let (kind, sev, key) = match sig {
+                    crate::sensors::security::SecSignal::NewUser(_) => {
+                        (EventKind::NewUser, Severity::Warning, "sec:user")
+                    }
+                    crate::sensors::security::SecSignal::PackageInstalled(_) => {
+                        (EventKind::PackageInstalled, Severity::Info, "sec:pkg")
+                    }
+                };
+                evs.push(AgentEvent {
+                    id: format!("{}-{}", key, line.ts_ms),
+                    ts: line.ts_ms,
+                    host_id: host_id.into(),
+                    key: key.into(),
+                    kind,
+                    severity: sev,
+                    summary: line.message.clone(),
+                    evidence: vec![Evidence {
+                        ts: line.ts_ms,
+                        source: "journald".into(),
+                        detail: line.message.clone(),
+                    }],
+                });
+            }
             if !state.error_regexes.is_empty() {
                 for (pat, re) in &state.error_regexes {
                     if re.is_match(&line.message) {
@@ -553,6 +588,39 @@ pub fn run_once(
             host_id,
             runners.openssl.as_ref(),
         ));
+    }
+
+    // persistence change detection (cron + systemd units): the first scan
+    // only seeds the baseline; later scans diff and emit on changes
+    if ts - state.persistence_scan >= PERSISTENCE_SCAN_MS {
+        state.persistence_scan = ts;
+        let after = crate::sensors::security::snapshot_dir(Path::new("/etc/cron.d"));
+        let mut after_sys =
+            crate::sensors::security::snapshot_dir(Path::new("/etc/systemd/system"));
+        for (k, v) in after {
+            after_sys.insert(format!("systemd/{}", k), v);
+        }
+        let mut all_changed = Vec::new();
+        if let Some(before) = &state.persistence_snapshot {
+            all_changed = crate::sensors::security::diff_snapshots(before, &after_sys);
+        }
+        state.persistence_snapshot = Some(after_sys);
+        for path in all_changed {
+            evs.push(AgentEvent {
+                id: format!("persist-{}-{}", path, ts),
+                ts,
+                host_id: host_id.into(),
+                key: format!("persist:{}", path),
+                kind: EventKind::PersistenceChanged,
+                severity: Severity::Warning,
+                summary: format!("persistence change: {}", path),
+                evidence: vec![Evidence {
+                    ts,
+                    source: "security".into(),
+                    detail: format!("Path={}", path),
+                }],
+            });
+        }
     }
 
     // error-rate spikes: prune windows, emit episodes, reset counters
@@ -1131,6 +1199,51 @@ mod tests {
         assert!(evs.iter().any(
             |e| e.kind == EventKind::ClockChange && e.severity == wt_common::Severity::Warning
         ));
+    }
+
+    #[test]
+    fn run_once_emits_security_signals_and_seeds_persistence() {
+        let cfg = Config::default();
+        let mut state = AgentState::new(&cfg, "h-1");
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let lines = [
+            r#"{"__REALTIME_TIMESTAMP":"1758000020000000","SYSLOG_IDENTIFIER":"useradd","MESSAGE":"new user: name=alice"}"#,
+            r#"{"__REALTIME_TIMESTAMP":"1758000021000000","SYSLOG_IDENTIFIER":"dpkg","MESSAGE":"status installed nginx:amd64 1.18.0"}"#,
+        ];
+        let runners = runners_with("", &lines.join("\n"), "");
+        let mut deduper = Deduper::new(300);
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_023_000,
+            &p,
+            &runners,
+            &mut state,
+        );
+        assert!(evs
+            .iter()
+            .any(|e| e.kind == EventKind::NewUser && e.severity == wt_common::Severity::Warning));
+        assert!(evs
+            .iter()
+            .any(|e| e.kind == EventKind::PackageInstalled
+                && e.severity == wt_common::Severity::Info));
+        // first persistence scan only seeds the baseline — no events
+        assert!(state.persistence_snapshot.is_some());
+        assert!(!evs.iter().any(|e| e.kind == EventKind::PersistenceChanged));
+        // second poll within the interval does not re-scan
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_024_000,
+            &p,
+            &runners,
+            &mut state,
+        );
+        assert!(!evs.iter().any(|e| e.kind == EventKind::PersistenceChanged));
     }
 
     #[test]
