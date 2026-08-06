@@ -334,7 +334,7 @@ mod tests {
         );
         let runners = crate::cmd::Runners::with_fakes(
             Box::new(FakeRunner {
-                out: "running".into(),
+                out: String::new(),
                 ok_program: "systemctl",
             }),
             Box::new(FakeRunner {
