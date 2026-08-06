@@ -62,6 +62,7 @@ pub fn default_rules() -> Vec<Rule> {
                 EventKind::SudoUsed,
                 EventKind::ServiceRestarted,
                 EventKind::CpuSpike, // absorbed INTO the incident so the demo yields one notification
+                EventKind::ErrorRateSpike, // app errors join the outage narrative
             ],
             // probe failure rides along as evidence; it alone must not
             // satisfy min_supporting and open a config-change incident
@@ -1082,5 +1083,23 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
         let req = handle.join().unwrap();
         assert!(req.contains("watchtower.incident"));
         assert!(req.contains("myapp.service became unhealthy"));
+    }
+
+    #[test]
+    fn m5_kinds_flow_to_incidents() {
+        let rules = default_rules();
+        let cfg_rule = rules
+            .iter()
+            .find(|r| r.id == "config_change_outage")
+            .unwrap();
+        // error spikes are supporting evidence for the outage rule
+        assert!(cfg_rule.supporting.contains(&EventKind::ErrorRateSpike));
+        // container crash loops and cert expiry fall through the fallback
+        for kind in [EventKind::ContainerCrashLoop, EventKind::CertExpiring] {
+            let evs = vec![ev("e-1", 999_999_800_000, kind, Severity::Critical, "k:1")];
+            let drafts = fallback_incidents(&evs, 1_000_000_000_000, "h-1");
+            assert_eq!(drafts.len(), 1, "{:?} must incident via fallback", kind);
+            assert_eq!(drafts[0].severity, "Critical");
+        }
     }
 }

@@ -1,6 +1,11 @@
 const TOKEN_KEY = "watchtower_token";
 const KINDS = ["Reboot", "ServiceFailed", "ServiceCrashLoop", "DiskHigh", "InodeHigh",
-               "CpuSpike", "MemHigh", "LoadHigh", "SwapHigh", "NetDevErrors", "HostUnreachable"];
+               "CpuSpike", "MemHigh", "LoadHigh", "SwapHigh", "NetDevErrors",
+               "HostUnreachable", "SshLogin", "SshFailed", "SshBruteForce", "RootLogin",
+               "SudoUsed", "FileChanged", "NewListeningPort", "NewOutboundConnection",
+               "ConnectionRateSpike", "ServiceRestarted", "AgentHeartbeatMissing",
+               "AgentQueueGrowing", "ErrorRateSpike", "ContainerStopped",
+               "ContainerCrashLoop", "CertExpiring"];
 let token = localStorage.getItem(TOKEN_KEY) || "";
 
 const $ = (id) => document.getElementById(id);

@@ -13,6 +13,8 @@ See `docs/specs/product-spec.md` and `docs/specs/architecture.md`.
 - Security sensors (M3): SSH login/auth + brute-force + first-seen IPs (journald),
   root/sudo activity (journald), file-integrity (inotify, Linux), network flow
   (new ports, new outbound destinations, connection-rate spikes)
+- M5 sensors: reboot detection, app error-rate spikes (journald patterns),
+  docker containers (states + crash loops), TLS certificate expiry
 - Local engine: rolling-median spike detection, dedup windows, threshold rules
 - Telemetry: batched POST, JSONL disk spool + ack-based drain, heartbeat
 - CLI: `check` (one-shot), `run` (continuous), config at `/etc/watchtower/agent.toml`
@@ -43,6 +45,9 @@ Control plane core (`watchtower-server`):
 - Integration check: `./scripts/integration-test.sh`
 - M3 security sensors: see M1 status above. Config keys: `watch_paths`,
   `ssh_brute_threshold`, `ssh_brute_window_secs` in agent.toml.
+- M5 config keys: `error_patterns`, `error_window_secs`, `error_threshold`,
+  `docker_enabled`, `cert_paths`, `cert_warn_days`, `cert_crit_days`,
+  `cert_scan_interval_secs` in agent.toml
 
 Incidents, correlation, notifications: M4.
 
