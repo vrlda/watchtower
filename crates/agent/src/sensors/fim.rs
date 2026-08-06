@@ -16,7 +16,7 @@ pub fn spawn_watcher(files: Vec<WatchedFile>, tx: Sender<FimEvent>) -> std::io::
     let mut inotify = Inotify::init()?;
     let mut watches = Vec::new();
     for f in &files {
-        let wd = inotify.add_watch(
+        let wd = inotify.watches().add(
             f.parent(),
             WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO | WatchMask::DELETE,
         )?;
