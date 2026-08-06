@@ -18,6 +18,7 @@ pub struct NotifyConfig {
     pub webhook_url: String,
     pub slack_url: String,
     pub telegram_token: Option<String>,
+    pub telegram_chat_id: Option<i64>,
     pub routing: HashMap<String, Vec<String>>,
 }
 
@@ -27,6 +28,7 @@ impl Default for NotifyConfig {
             webhook_url: String::new(),
             slack_url: String::new(),
             telegram_token: None,
+            telegram_chat_id: None,
             routing: default_routing(),
         }
     }
@@ -115,10 +117,10 @@ pub struct TelegramClient {
 }
 
 impl TelegramClient {
-    pub fn new(token: String) -> Self {
+    pub fn new(token: String, chat: Option<i64>) -> Self {
         TelegramClient {
             token,
-            chat_id: std::sync::Mutex::new(None),
+            chat_id: std::sync::Mutex::new(chat),
         }
     }
 }
@@ -196,6 +198,7 @@ pub fn telegram_send(client: &TelegramClient, api_base: &str, text: &str) -> Res
         Some(c) => c,
         None => match resolve_chat_id(api_base, &client.token)? {
             Some(c) => {
+                eprintln!("telegram: resolved chat id {}", c);
                 *client.chat_id.lock().unwrap() = Some(c);
                 c
             }
@@ -226,9 +229,12 @@ static TELEGRAM: std::sync::OnceLock<TelegramClient> = std::sync::OnceLock::new(
 static TELEGRAM_MISCONFIG_LOGGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-pub fn telegram_client(token: Option<&str>) -> Option<&'static TelegramClient> {
+pub fn telegram_client(
+    token: Option<&str>,
+    pinned_chat: Option<i64>,
+) -> Option<&'static TelegramClient> {
     let token = token?;
-    Some(TELEGRAM.get_or_init(|| TelegramClient::new(token.to_string())))
+    Some(TELEGRAM.get_or_init(|| TelegramClient::new(token.to_string(), pinned_chat)))
 }
 
 /// Timestamp → "YYYY-MM-DD HH:MM:SS" (UTC). No chrono — civil-from-days.
@@ -290,7 +296,7 @@ pub async fn notify_incident(
                     continue;
                 }
                 Some(token) => {
-                    if let Some(client) = telegram_client(Some(token)) {
+                    if let Some(client) = telegram_client(Some(token), cfg.telegram_chat_id) {
                         let text = telegram_payload(incident_json, ui_base_url);
                         let ok = tokio::task::spawn_blocking(move || {
                             telegram_send(client, TELEGRAM_API, &text)
@@ -512,6 +518,7 @@ mod tests {
             webhook_url: "http://w".into(),
             slack_url: "http://s".into(),
             telegram_token: None,
+            telegram_chat_id: None,
             routing: default_routing(),
         };
         let c = channels_for(&cfg, "Critical");
@@ -638,8 +645,7 @@ mod tests {
             req
         });
         let base = format!("http://{}", addr);
-        let client = TelegramClient::new("test-token".into());
-        *client.chat_id.lock().unwrap() = Some(42); // pre-seeded (auto-resolve covered elsewhere)
+        let client = TelegramClient::new("test-token".into(), Some(42)); // pre-seeded (auto-resolve covered elsewhere)
         let ok = telegram_send(&client, &base, "hello").unwrap();
         assert!(ok);
         let req = handle.join().unwrap();
@@ -681,6 +687,58 @@ mod tests {
         let base = format!("http://{}", addr);
         let chat = resolve_chat_id(&base, "tok").unwrap();
         assert_eq!(chat, Some(12345));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn telegram_pinned_chat_skips_get_updates() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
+            let mut buf = [0u8; 65536];
+            let mut n = 0;
+            loop {
+                match stream.read(&mut buf[n..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        n += read;
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        if let Some(pos) = text.find("\r\n\r\n") {
+                            let cl = text[..pos]
+                                .lines()
+                                .find_map(|l| l.strip_prefix("Content-Length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if n >= pos + 4 + cl {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+            assert!(
+                !text.contains("getUpdates"),
+                "pinned chat must never call getUpdates, got: {}",
+                text.lines().next().unwrap_or("")
+            );
+            let body = r#"{"ok":true,"result":{}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+        let base = format!("http://{}", addr);
+        let client = TelegramClient::new("tok".into(), Some(999));
+        let ok = telegram_send(&client, &base, "hello").unwrap();
+        assert!(ok);
+        assert_eq!(*client.chat_id.lock().unwrap(), Some(999));
         handle.join().unwrap();
     }
 
@@ -742,7 +800,7 @@ mod tests {
             }
         });
         let base = format!("http://{}", addr);
-        let client = TelegramClient::new("tok".into());
+        let client = TelegramClient::new("tok".into(), None); // unknown chat → resolve path
         assert_eq!(*client.chat_id.lock().unwrap(), None);
         let ok = telegram_send(&client, &base, "hello").unwrap();
         assert!(ok);

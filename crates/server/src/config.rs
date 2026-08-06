@@ -115,6 +115,22 @@ impl Default for ServerConfig {
     }
 }
 
+/// Apply the Telegram env overrides (the "1-2 line" setup):
+/// TELEGRAM_BOT_TOKEN (required for the channel) and the optional
+/// TELEGRAM_CHAT_ID (pins the target chat; without it, the chat is
+/// auto-discovered from the bot's updates).
+pub fn apply_telegram_env(cfg: &mut ServerConfig, token: Option<String>, chat: Option<String>) {
+    if let Some(t) = token {
+        cfg.notify.telegram_token = Some(t);
+    }
+    if let Some(c) = chat {
+        match c.trim().parse::<i64>() {
+            Ok(id) => cfg.notify.telegram_chat_id = Some(id),
+            Err(_) => eprintln!("invalid TELEGRAM_CHAT_ID {:?} — ignoring", c),
+        }
+    }
+}
+
 pub fn load(path: &PathBuf) -> ServerConfig {
     let mut cfg = match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
@@ -126,10 +142,11 @@ pub fn load(path: &PathBuf) -> ServerConfig {
             ServerConfig::default()
         }
     };
-    // one-line Telegram setup: token from the environment
-    if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
-        cfg.notify.telegram_token = Some(token);
-    }
+    apply_telegram_env(
+        &mut cfg,
+        std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+        std::env::var("TELEGRAM_CHAT_ID").ok(),
+    );
     cfg
 }
 
@@ -162,5 +179,16 @@ mod tests {
         assert_eq!(cfg.rules.len(), 2);
         assert_eq!(cfg.rules[0].id, "a");
         assert_eq!(cfg.rules[1].id, "b");
+    }
+
+    #[test]
+    fn telegram_env_overrides_apply() {
+        let mut cfg = ServerConfig::default();
+        apply_telegram_env(&mut cfg, Some("tok".into()), Some("12345".into()));
+        assert_eq!(cfg.notify.telegram_token.as_deref(), Some("tok"));
+        assert_eq!(cfg.notify.telegram_chat_id, Some(12345));
+        let mut cfg2 = ServerConfig::default();
+        apply_telegram_env(&mut cfg2, Some("tok".into()), Some("abc".into()));
+        assert_eq!(cfg2.notify.telegram_chat_id, None);
     }
 }
