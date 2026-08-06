@@ -1,3 +1,4 @@
+mod audit;
 mod cmd;
 mod discover;
 mod engine;
@@ -100,6 +101,12 @@ fn main() {
         Cmd::Run => {
             let mut deduper = engine::Deduper::new(cfg.dedup_secs);
             let mut state = engine::AgentState::new(&cfg, &host_id);
+            // startup permission audit — fail loudly, then keep running
+            // (sensors fail-open, but the operator saw the summary)
+            for row in audit::audit(&runners, &PathBuf::from(&cfg.spool_dir)) {
+                let mark = if row.ok { "ok" } else { "WARN" };
+                eprintln!("[audit] {}: {} — {}", mark, row.name, row.detail);
+            }
             // Seed the journal cursor to now (ms): reading the whole journal
             // since epoch on first start would blow the 10s timeout.
             state.journal_since_ms = now_ms();
