@@ -159,6 +159,7 @@ pub struct AgentState {
     pub ssh_seen: SeenIps,
     pub ssh_brute: BruteForceTracker,
     pub net: NetState,
+    pub docker: crate::sensors::docker::ContainerTracker,
     pub reboot: RebootDetector,
     /// Journal read cursor in unix MILLIS: the max line ts_ms seen. The
     /// journalctl @since arg (seconds) is derived as journal_since_ms / 1000.
@@ -181,6 +182,7 @@ impl AgentState {
             ssh_seen: SeenIps::default(),
             ssh_brute: BruteForceTracker::new(cfg.ssh_brute_threshold, cfg.ssh_brute_window_secs),
             net: NetState::default(),
+            docker: crate::sensors::docker::ContainerTracker::default(),
             reboot: RebootDetector::default(),
             journal_since_ms: 0,
             fim_rx: None,
@@ -400,6 +402,18 @@ pub fn run_once(
 
     // netflow sensor
     evs.extend(state.net.observe(procfs, ts, host_id));
+
+    // docker sensor (fail-open: no docker binary / daemon → nothing)
+    if cfg.docker_enabled {
+        if let Ok(out) = runners
+            .docker
+            .run(&["ps", "-a", "--no-trunc", "--format", "{{json .}}"])
+        {
+            if let Ok(containers) = crate::sensors::docker::parse_docker_ps(&out) {
+                state.docker.observe(&containers, ts, host_id, &mut evs);
+            }
+        }
+    }
 
     // error-rate spikes: prune windows, emit episodes, reset counters
     if !state.error_regexes.is_empty() {

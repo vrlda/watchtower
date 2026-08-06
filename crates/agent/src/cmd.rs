@@ -55,7 +55,6 @@ impl CommandRunner for JournalCtl {
 pub struct Runners {
     pub sys: Box<dyn CommandRunner>,
     pub journal: Box<dyn CommandRunner>,
-    #[allow(dead_code)] // wired in Task 5 (docker sensor)
     pub docker: Box<dyn CommandRunner>,
 }
 

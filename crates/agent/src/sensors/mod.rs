@@ -1,3 +1,4 @@
+pub mod docker;
 #[cfg(target_os = "linux")]
 pub mod fim;
 pub mod fim_types;
