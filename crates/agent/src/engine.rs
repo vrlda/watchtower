@@ -79,6 +79,32 @@ impl Deduper {
     }
 }
 
+/// Detects boot-epoch changes (uptime resets) between polls. A reboot resets
+/// uptime, moving boot far earlier; the 60s threshold absorbs clock jitter
+/// and small NTP steps.
+#[derive(Default)]
+pub struct RebootDetector {
+    boot_epoch: Option<i64>,
+}
+
+impl RebootDetector {
+    /// Returns (reboot_fired, boot_epoch). Threshold: >60s epoch jump.
+    pub fn observe(&mut self, boot: i64, _ts_ms: i64) -> (bool, i64) {
+        let fired = match self.boot_epoch {
+            Some(prev) => (boot - prev).abs() > 60_000, // 60s, ms units
+            None => false,
+        };
+        self.boot_epoch = Some(boot);
+        (fired, boot)
+    }
+}
+
+/// Boot epoch (unix millis) from a now and uptime; None when uptime is
+/// unreadable.
+pub fn boot_epoch(now_ms: i64, uptime_secs: f64) -> Option<i64> {
+    Some(now_ms - (uptime_secs * 1000.0) as i64)
+}
+
 /// CPU usage state across polls: rolling baseline + spike event emission.
 pub struct CpuState {
     host: String,
@@ -133,6 +159,7 @@ pub struct AgentState {
     pub ssh_seen: SeenIps,
     pub ssh_brute: BruteForceTracker,
     pub net: NetState,
+    pub reboot: RebootDetector,
     /// Journal read cursor in unix MILLIS: the max line ts_ms seen. The
     /// journalctl @since arg (seconds) is derived as journal_since_ms / 1000.
     /// Lines with ts_ms <= cursor are skipped, so a line is never processed
@@ -150,6 +177,7 @@ impl AgentState {
             ssh_seen: SeenIps::default(),
             ssh_brute: BruteForceTracker::new(cfg.ssh_brute_threshold, cfg.ssh_brute_window_secs),
             net: NetState::default(),
+            reboot: RebootDetector::default(),
             journal_since_ms: 0,
             fim_rx: None,
         }
@@ -199,6 +227,29 @@ pub fn run_once(
     state.cpu.total = total;
     state.cpu.busy = busy;
     evs.extend(state.cpu.observe(pct, ts));
+
+    // reboot sensor: boot epoch = now - uptime; uptime resets = reboot
+    if let Ok(uptime) = procfs.uptime_secs() {
+        if let Some(boot) = boot_epoch(ts, uptime) {
+            let (fired, boot) = state.reboot.observe(boot, ts);
+            if fired {
+                evs.push(AgentEvent {
+                    id: format!("reboot-{}", ts),
+                    ts,
+                    host_id: host_id.into(),
+                    key: "system:reboot".into(),
+                    kind: EventKind::Reboot,
+                    severity: Severity::Warning,
+                    summary: "system rebooted (uptime reset)".into(),
+                    evidence: vec![Evidence {
+                        ts,
+                        source: "procfs".into(),
+                        detail: format!("BootEpoch={}", boot),
+                    }],
+                });
+            }
+        }
+    }
 
     // systemd sensor
     if let Ok(states) = crate::sensors::systemd::systemctl_list_units(sys) {
@@ -651,6 +702,30 @@ mod tests {
             .expect("restart event");
         assert_eq!(ev.severity, wt_common::Severity::Info);
         assert_eq!(ev.key, "svc:myapp.service");
+    }
+
+    #[test]
+    fn boot_epoch_matches_clock_minus_uptime() {
+        assert_eq!(boot_epoch(1_000_000_000_000, 3600.0), Some(999_996_400_000));
+        assert_eq!(boot_epoch(1_000_000_000_000, 0.0), Some(1_000_000_000_000));
+    }
+
+    #[test]
+    fn reboot_detector_fires_on_epoch_jump() {
+        let mut d = RebootDetector::default();
+        assert!(!d.observe(1_000_000_000, 0).0, "seed only");
+        let (fired, _) = d.observe(999_996_400_000, 1000);
+        assert!(fired);
+        let (fired, _) = d.observe(999_996_400_010, 1010);
+        assert!(!fired, "stable after jump");
+    }
+
+    #[test]
+    fn reboot_detector_ignores_clock_steps() {
+        // clock steps move now and boot together → no false reboot
+        let mut d = RebootDetector::default();
+        d.observe(1_000_000_000, 0);
+        assert!(!d.observe(1_000_000_100, 1000).0); // +100s clock step, same uptime
     }
 
     struct FakeSys {
