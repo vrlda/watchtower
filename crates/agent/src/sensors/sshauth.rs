@@ -29,6 +29,9 @@ pub fn classify(line: &JournalLine) -> Option<AuthEvent> {
     let msg = line.message.as_str();
     match line.ident.as_str() {
         "sshd" => {
+            // NOTE: "pam_unix(sshd:session): session opened for user X" lines
+            // are intentionally NOT classified — they fire alongside every
+            // successful login ("Accepted ...") and would double-count.
             if let Some(rest) = msg.strip_prefix("Accepted ") {
                 let (user, ip) = parse_user_ip(rest)?;
                 let kind = if user == "root" {
@@ -320,6 +323,16 @@ mod tests {
         let ev = classify(&l).expect("classified");
         assert_eq!(ev.kind, AuthKind::RootLogin);
         assert_eq!(ev.user, "root");
+    }
+
+    #[test]
+    fn ignores_sshd_session_opened() {
+        let l = line(
+            1000,
+            "sshd",
+            "pam_unix(sshd:session): session opened for user deploy by (uid=1000)",
+        );
+        assert!(classify(&l).is_none());
     }
 
     #[test]

@@ -11,3 +11,6 @@ ureq = { version = "2", features = ["tls"] }
 toml = "0.8"
 libc = "0.2"
 wt-common = { path = "../wt-common" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = "0.10"
