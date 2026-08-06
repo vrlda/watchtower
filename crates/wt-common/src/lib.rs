@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod civil;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum Severity {
@@ -50,6 +52,15 @@ pub enum EventKind {
     AgentHeartbeatMissing,
     /// Server-generated: a host's telemetry spool queue is growing (Warning).
     AgentQueueGrowing,
+    /// Error-pattern count in application logs exceeded the threshold
+    /// within the window (Warning).
+    ErrorRateSpike,
+    /// A tracked container stopped or exited (Warning).
+    ContainerStopped,
+    /// A container is crash-looping (restarting repeatedly) (Critical).
+    ContainerCrashLoop,
+    /// A TLS certificate is nearing expiry or expired (Warning/Critical).
+    CertExpiring,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +115,25 @@ pub struct Config {
     /// Files (absolute paths) watched for modification by the FIM sensor.
     #[serde(default)]
     pub watch_paths: Vec<String>,
+    /// Regex patterns counted as application errors in journald lines.
+    #[serde(default)]
+    pub error_patterns: Vec<String>,
+    /// Seconds window for error counting.
+    pub error_window_secs: i64,
+    /// Errors within the window that trigger an ErrorRateSpike.
+    pub error_threshold: u32,
+    /// Watch Docker container states (docker binary required).
+    pub docker_enabled: bool,
+    /// Certificate paths (files or globs) to scan for expiry. Defaults to
+    /// common locations when empty.
+    #[serde(default)]
+    pub cert_paths: Vec<String>,
+    /// Days before expiry that raise a Warning.
+    pub cert_warn_days: i64,
+    /// Days before expiry that raise a Critical.
+    pub cert_crit_days: i64,
+    /// Seconds between certificate scans (they spawn openssl per cert).
+    pub cert_scan_interval_secs: i64,
     /// Failed logins for one (user, ip) within the window that constitute a
     /// brute-force episode.
     pub ssh_brute_threshold: u32,
@@ -130,6 +160,14 @@ impl Default for Config {
             swap_warn_pct: 50.0,
             spool_dir: "/var/lib/watchtower/spool".into(),
             watch_paths: Vec::new(),
+            error_patterns: Vec::new(),
+            error_window_secs: 300,
+            error_threshold: 10,
+            docker_enabled: true,
+            cert_paths: Vec::new(),
+            cert_warn_days: 14,
+            cert_crit_days: 3,
+            cert_scan_interval_secs: 3600,
             ssh_brute_threshold: 5,
             ssh_brute_window_secs: 300,
         }
@@ -262,5 +300,30 @@ mod tests {
             let v: serde_json::Value = serde_json::to_value(kind).unwrap();
             assert_eq!(v, expected);
         }
+    }
+
+    #[test]
+    fn m5_kinds_serialize() {
+        for (kind, expected) in [
+            (EventKind::ErrorRateSpike, "ErrorRateSpike"),
+            (EventKind::ContainerStopped, "ContainerStopped"),
+            (EventKind::ContainerCrashLoop, "ContainerCrashLoop"),
+            (EventKind::CertExpiring, "CertExpiring"),
+        ] {
+            let v: serde_json::Value = serde_json::to_value(kind).unwrap();
+            assert_eq!(v, expected);
+        }
+    }
+
+    #[test]
+    fn config_has_m5_fields() {
+        let cfg = Config::default();
+        assert!(cfg.error_patterns.is_empty());
+        assert_eq!(cfg.error_window_secs, 300);
+        assert_eq!(cfg.error_threshold, 10);
+        assert!(cfg.docker_enabled);
+        assert_eq!(cfg.cert_warn_days, 14);
+        assert_eq!(cfg.cert_crit_days, 3);
+        assert_eq!(cfg.cert_scan_interval_secs, 3600);
     }
 }
