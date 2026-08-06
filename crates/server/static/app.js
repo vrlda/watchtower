@@ -84,7 +84,7 @@ async function loadIncidentDetail(id) {
 async function setIncidentStatus(id, action) {
   try {
     await api("/v1/incidents/" + encodeURIComponent(id) + "/" + action, { method: "POST" });
-    loadIncidentDetail(id);
+    await loadIncidentDetail(id);
   } catch (e) {
     $("err").style.display = "block";
     $("err").textContent = "failed: " + e.message;

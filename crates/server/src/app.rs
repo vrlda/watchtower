@@ -56,7 +56,9 @@ impl AppState {
         }
     }
 
-    #[cfg(test)]
+    /// Test helper: in-memory pool + default config. Intentionally NOT
+    /// `#[cfg(test)]` — integration tests (crates/server/tests) compile the
+    /// lib without that cfg and need it.
     pub async fn for_tests() -> Self {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
