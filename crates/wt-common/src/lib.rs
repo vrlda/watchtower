@@ -81,6 +81,11 @@ pub enum EventKind {
     PackageInstalled,
     /// Cron or systemd unit files under /etc changed (Warning).
     PersistenceChanged,
+    /// A process executed from a suspicious location or with reverse-shell
+    /// characteristics (Critical).
+    SuspiciousExec,
+    /// An executable from a non-system path not seen in the baseline (Warning).
+    UnexpectedExec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +179,8 @@ pub struct Config {
     pub scan_threshold: u32,
     /// Seconds window for scan counting.
     pub scan_window_secs: i64,
+    /// Seconds between process-snapshot scans (suspicious exec detection).
+    pub process_scan_interval_secs: i64,
 }
 
 impl Default for Config {
@@ -211,6 +218,7 @@ impl Default for Config {
             request_rate_window_secs: 60,
             scan_threshold: 25,
             scan_window_secs: 10,
+            process_scan_interval_secs: 30,
         }
     }
 }
@@ -418,5 +426,22 @@ mod tests {
         let cfg: Config =
             toml::from_str("server_url = \"x\"\nwatch_authorized_keys = false\n").unwrap();
         assert!(!cfg.watch_authorized_keys);
+    }
+
+    #[test]
+    fn p3t8_kinds_serialize() {
+        for (kind, expected) in [
+            (EventKind::SuspiciousExec, "SuspiciousExec"),
+            (EventKind::UnexpectedExec, "UnexpectedExec"),
+        ] {
+            let v: serde_json::Value = serde_json::to_value(kind).unwrap();
+            assert_eq!(v, expected);
+        }
+    }
+
+    #[test]
+    fn config_has_p3t8_fields() {
+        let cfg = Config::default();
+        assert_eq!(cfg.process_scan_interval_secs, 30);
     }
 }

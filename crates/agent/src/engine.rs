@@ -199,6 +199,11 @@ pub struct AgentState {
     pub persistence_snapshot: Option<std::collections::HashMap<String, (i64, u64)>>,
     /// Last persistence scan time (ms); gates the directory walk.
     pub persistence_scan: i64,
+    /// Executables outside system paths seen in the last process scan; None
+    /// until the first scan seeds the baseline.
+    pub known_exes: Option<std::collections::HashSet<String>>,
+    /// Last process scan time (ms); gates the /proc walk.
+    pub last_proc_scan: i64,
 }
 
 impl AgentState {
@@ -235,6 +240,8 @@ impl AgentState {
             request_counts: Default::default(),
             persistence_snapshot: None,
             persistence_scan: 0,
+            known_exes: None,
+            last_proc_scan: 0,
         }
     }
 
@@ -620,6 +627,63 @@ pub fn run_once(
                     detail: format!("Path={}", path),
                 }],
             });
+        }
+    }
+
+    // process snapshot: suspicious + unexpected exec (heuristic)
+    if ts - state.last_proc_scan >= cfg.process_scan_interval_secs.max(10) * 1000 {
+        state.last_proc_scan = ts;
+        let procs = crate::sensors::process::scan_procs(Path::new("/proc"));
+        for p in &procs {
+            if let Some(reason) = crate::sensors::process::suspicious(p) {
+                evs.push(AgentEvent {
+                    id: format!("susp-{}-{}", p.pid, ts),
+                    ts,
+                    host_id: host_id.into(),
+                    key: format!("suspicious:{}", p.pid),
+                    kind: EventKind::SuspiciousExec,
+                    severity: Severity::Critical,
+                    summary: format!("suspicious process {} ({}): {}", p.pid, p.exe, reason),
+                    evidence: vec![Evidence {
+                        ts,
+                        source: "process".into(),
+                        detail: format!(
+                            "Pid={} Exe={} Cmdline={} Reason={}",
+                            p.pid, p.exe, p.cmdline, reason
+                        ),
+                    }],
+                });
+            }
+        }
+        // unexpected executables: baseline learning
+        let current: std::collections::HashSet<String> = procs
+            .iter()
+            .filter(|p| !p.exe.is_empty() && !crate::sensors::process::is_system_path(&p.exe))
+            .map(|p| p.exe.clone())
+            .collect();
+        match &state.known_exes {
+            None => {
+                state.known_exes = Some(current); // baseline
+            }
+            Some(baseline) => {
+                for exe in current.difference(baseline) {
+                    evs.push(AgentEvent {
+                        id: format!("unexe-{}-{}", exe, ts),
+                        ts,
+                        host_id: host_id.into(),
+                        key: format!("unexpected:{}", exe),
+                        kind: EventKind::UnexpectedExec,
+                        severity: Severity::Warning,
+                        summary: format!("unexpected executable running: {}", exe),
+                        evidence: vec![Evidence {
+                            ts,
+                            source: "process".into(),
+                            detail: format!("Exe={}", exe),
+                        }],
+                    });
+                }
+                state.known_exes.as_mut().unwrap().extend(current);
+            }
         }
     }
 

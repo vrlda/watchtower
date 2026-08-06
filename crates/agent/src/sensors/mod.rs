@@ -7,6 +7,7 @@ pub mod fim;
 pub mod fim_types;
 pub mod health;
 pub mod netflow;
+pub mod process;
 pub mod resource;
 pub mod security;
 pub mod sshauth;
