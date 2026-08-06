@@ -61,6 +61,14 @@ pub enum EventKind {
     ContainerCrashLoop,
     /// A TLS certificate is nearing expiry or expired (Warning/Critical).
     CertExpiring,
+    /// The kernel OOM killer terminated a process (Critical).
+    OomKill,
+    /// Kernel panic evidence in the journal (Critical).
+    KernelPanic,
+    /// A mounted filesystem went read-only (Critical).
+    FsReadOnly,
+    /// The system clock was adjusted (NTP step) (Warning).
+    ClockChange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +317,10 @@ mod tests {
             (EventKind::ContainerStopped, "ContainerStopped"),
             (EventKind::ContainerCrashLoop, "ContainerCrashLoop"),
             (EventKind::CertExpiring, "CertExpiring"),
+            (EventKind::OomKill, "OomKill"),
+            (EventKind::KernelPanic, "KernelPanic"),
+            (EventKind::FsReadOnly, "FsReadOnly"),
+            (EventKind::ClockChange, "ClockChange"),
         ] {
             let v: serde_json::Value = serde_json::to_value(kind).unwrap();
             assert_eq!(v, expected);

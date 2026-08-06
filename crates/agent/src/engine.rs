@@ -413,6 +413,33 @@ pub fn run_once(
                     }],
                 });
             }
+            if let Some(sig) = crate::sensors::health::classify(line) {
+                let (kind, sev, key) = match sig {
+                    crate::sensors::health::HealthSignal::OomKill => {
+                        (EventKind::OomKill, Severity::Critical, "health:oom")
+                    }
+                    crate::sensors::health::HealthSignal::KernelPanic => {
+                        (EventKind::KernelPanic, Severity::Critical, "health:panic")
+                    }
+                    crate::sensors::health::HealthSignal::ClockChange => {
+                        (EventKind::ClockChange, Severity::Warning, "health:clock")
+                    }
+                };
+                evs.push(AgentEvent {
+                    id: format!("{}-{}", key, line.ts_ms),
+                    ts: line.ts_ms,
+                    host_id: host_id.into(),
+                    key: key.into(),
+                    kind,
+                    severity: sev,
+                    summary: line.message.clone(),
+                    evidence: vec![Evidence {
+                        ts: line.ts_ms,
+                        source: "journald".into(),
+                        detail: line.message.clone(),
+                    }],
+                });
+            }
             if !state.error_regexes.is_empty() {
                 for (pat, re) in &state.error_regexes {
                     if re.is_match(&line.message) {
@@ -1002,6 +1029,38 @@ mod tests {
             evs.iter().any(|e| e.kind == EventKind::ErrorRateSpike),
             "3 errors ≥ threshold 2"
         );
+    }
+
+    #[test]
+    fn run_once_emits_health_signals() {
+        let cfg = Config::default();
+        let mut state = AgentState::new(&cfg, "h-1");
+        let p = crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        );
+        let lines = [
+            r#"{"__REALTIME_TIMESTAMP":"1758000020000000","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"Out of memory: Killed process 1 (init) total-vm:123"}"#,
+            r#"{"__REALTIME_TIMESTAMP":"1758000021000000","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"Kernel panic - not syncing"}"#,
+            r#"{"__REALTIME_TIMESTAMP":"1758000022000000","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"Time has been changed"}"#,
+        ];
+        let runners = runners_with("", &lines.join("\n"), "");
+        let mut deduper = Deduper::new(300);
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_023_000,
+            &p,
+            &runners,
+            &mut state,
+        );
+        assert!(evs
+            .iter()
+            .any(|e| e.kind == EventKind::OomKill && e.severity == wt_common::Severity::Critical));
+        assert!(evs.iter().any(|e| e.kind == EventKind::KernelPanic));
+        assert!(evs.iter().any(
+            |e| e.kind == EventKind::ClockChange && e.severity == wt_common::Severity::Warning
+        ));
     }
 
     struct FakeSys {
