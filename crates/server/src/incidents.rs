@@ -219,6 +219,29 @@ pub async fn touch_incident(
     Ok(now)
 }
 
+/// Raise the incident severity if `severity` is higher (never lower).
+pub async fn raise_severity(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    severity: &str,
+) -> Result<(), sqlx::Error> {
+    // severity strings are the wire values; compare via CASE on the stored
+    // order: Critical > Warning > Info
+    sqlx::query(
+        "UPDATE incidents SET severity = ?2, updated_at = ?3
+         WHERE id = ?1 AND (
+            (severity = 'Info' AND ?2 != 'Info')
+            OR (severity = 'Warning' AND ?2 = 'Critical')
+         )",
+    )
+    .bind(id)
+    .bind(severity)
+    .bind(now_ms())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Ack or resolve an incident at an explicit timestamp: sets the status,
 /// stamps the ack/resolve time, and bumps updated_at. Returns true when a
 /// row was updated (unknown id → false).

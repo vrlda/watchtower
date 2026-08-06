@@ -5,12 +5,16 @@ use wt_common::{AgentEvent, EventKind, Evidence, Severity};
 
 use crate::app::AppState;
 
-/// Watchdog episode state per host: heartbeat-missing emission per episode.
+/// Watchdog episode state per host: per-episode emission tracking for
+/// heartbeat-missing and queue-growth alerts.
 #[derive(Default)]
 pub struct WatchdogState {
     /// last_seen at which AgentHeartbeatMissing was emitted, per host. A
     /// fresh heartbeat advances last_seen and opens a new episode.
     missing_emitted: HashMap<String, i64>,
+    /// Whether AgentQueueGrowing was emitted in the current queue episode,
+    /// per host. Reset when the queue drops to/below the threshold.
+    queue_emitted: HashMap<String, bool>,
 }
 
 /// Scan hosts for liveness + queue growth. Emits server-generated events
@@ -56,7 +60,12 @@ pub async fn watchdog_scan(state: &AppState, now: i64) -> Result<Vec<AgentEvent>
             // host is reporting again — the episode is over
             tracker.missing_emitted.remove(&host_id);
         }
-        if queue_len > queue_threshold {
+        let q_emitted = tracker
+            .queue_emitted
+            .entry(host_id.clone())
+            .or_insert(false);
+        if queue_len > queue_threshold && !*q_emitted {
+            *q_emitted = true;
             evs.push(AgentEvent {
                 id: Uuid::new_v4().to_string(),
                 ts: now,
@@ -74,6 +83,9 @@ pub async fn watchdog_scan(state: &AppState, now: i64) -> Result<Vec<AgentEvent>
                     detail: format!("QueueLen={} Threshold={}", queue_len, queue_threshold),
                 }],
             });
+        } else if queue_len <= queue_threshold {
+            // queue recovered — the episode is over
+            *q_emitted = false;
         }
     }
     Ok(evs)
@@ -172,11 +184,37 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, EventKind::AgentQueueGrowing);
         assert_eq!(evs[0].severity, Severity::Warning);
+        // still above threshold → same episode → no re-emission
         let evs = watchdog_scan(&state, now + 1000).await.unwrap();
+        assert!(
+            evs.is_empty(),
+            "one event per queue episode while above threshold"
+        );
+        // queue drains below threshold → episode resets, nothing to emit
+        let hb = wt_common::Heartbeat {
+            host_id: "h-1".into(),
+            ts: crate::ingest::now_ms(),
+            version: "0.1".into(),
+            queue_len: 10,
+        };
+        upsert_host(&state.pool, &hb).await.unwrap();
+        let now = crate::ingest::now_ms();
+        let evs = watchdog_scan(&state, now).await.unwrap();
+        assert!(evs.is_empty(), "below threshold: no event");
+        // queue grows again → NEW episode → re-emits once
+        let hb = wt_common::Heartbeat {
+            host_id: "h-1".into(),
+            ts: crate::ingest::now_ms(),
+            version: "0.1".into(),
+            queue_len: 150,
+        };
+        upsert_host(&state.pool, &hb).await.unwrap();
+        let now = crate::ingest::now_ms();
+        let evs = watchdog_scan(&state, now).await.unwrap();
         assert_eq!(
             evs.len(),
             1,
-            "re-emits each scan while above threshold (dedup throttles)"
+            "queue above threshold again re-emits (new episode)"
         );
     }
 }

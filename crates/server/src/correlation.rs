@@ -340,6 +340,18 @@ pub async fn scan_and_absorb(
             let new_links = incidents::link_events(pool, &inc.id, &draft.events).await?;
             if new_links > 0 {
                 incidents::touch_incident(pool, &inc.id).await?;
+                // severity may have risen (e.g. first-seen root login
+                // absorbs a Critical event into a Warning incident)
+                let worst = draft
+                    .events
+                    .iter()
+                    .map(|e| e.severity)
+                    .max()
+                    .unwrap_or(wt_common::Severity::Warning);
+                if worst > wt_common::Severity::Warning {
+                    incidents::raise_severity(pool, &inc.id, &crate::ingest::severity_wire(worst))
+                        .await?;
+                }
                 let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
                 if seen.insert(inc.id.clone()) {
                     changed.push(inc);
@@ -357,6 +369,22 @@ pub async fn scan_and_absorb(
                 let new_links = incidents::link_events(pool, &open.id, &draft.events).await?;
                 if new_links > 0 {
                     incidents::touch_incident(pool, &open.id).await?;
+                    // severity may have risen — the SQL guard in
+                    // raise_severity keeps it raise-only
+                    let worst = draft
+                        .events
+                        .iter()
+                        .map(|e| e.severity)
+                        .max()
+                        .unwrap_or(wt_common::Severity::Warning);
+                    if worst > wt_common::Severity::Warning {
+                        incidents::raise_severity(
+                            pool,
+                            &open.id,
+                            &crate::ingest::severity_wire(worst),
+                        )
+                        .await?;
+                    }
                     let inc = incidents::fetch_incident(pool, &open.id).await?.unwrap();
                     if seen.insert(inc.id.clone()) {
                         changed.push(inc);
@@ -931,6 +959,61 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
         assert!(
             incs.is_empty(),
             "cooldown suppresses re-open (rule AND fallback passes)"
+        );
+    }
+
+    #[tokio::test]
+    async fn absorb_raises_severity_when_critical_event_joins() {
+        let p = pool().await;
+        let rules = default_rules();
+        // scan 1: Warning RootLogin + Info SshLogin → root_login rule
+        // (min_supporting 0) → incident at the Warning floor
+        let e1 = ev(
+            "e-1",
+            999_999_800_000,
+            EventKind::RootLogin,
+            Severity::Warning,
+            "ssh:login:root",
+        );
+        let e2 = ev(
+            "e-2",
+            999_999_750_000,
+            EventKind::SshLogin,
+            Severity::Info,
+            "ssh:login:ops",
+        );
+        crate::ingest::store_events(&p, &[e1.clone(), e2.clone()])
+            .await
+            .unwrap();
+        let incs = scan_and_absorb(&p, &rules, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(incs.len(), 1);
+        assert_eq!(incs[0].severity, "Warning");
+        let id = incs[0].id.clone();
+        // scan 2: a NEW Critical RootLogin (first-seen) within the window
+        // absorbs into the open incident → severity re-derived to Critical
+        let e3 = ev(
+            "e-3",
+            999_999_900_000,
+            EventKind::RootLogin,
+            Severity::Critical,
+            "ssh:login:root:first-seen",
+        );
+        crate::ingest::store_events(&p, std::slice::from_ref(&e3))
+            .await
+            .unwrap();
+        let incs = scan_and_absorb(&p, &rules, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(incs.len(), 1, "absorb re-notifies the changed incident");
+        let inc = crate::incidents::fetch_incident(&p, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            inc.severity, "Critical",
+            "absorbing a Critical event raises the incident severity"
         );
     }
 
