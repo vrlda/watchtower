@@ -10,6 +10,9 @@ See `docs/specs/product-spec.md` and `docs/specs/architecture.md`.
 ## M1 status
 
 - Sensors: resource (mem, swap, load, netdev, cpu spikes), systemd service states + crash loops
+- Security sensors (M3): SSH login/auth + brute-force + first-seen IPs (journald),
+  root/sudo activity (journald), file-integrity (inotify, Linux), network flow
+  (new ports, new outbound destinations, connection-rate spikes)
 - Local engine: rolling-median spike detection, dedup windows, threshold rules
 - Telemetry: batched POST, JSONL disk spool + ack-based drain, heartbeat
 - CLI: `check` (one-shot), `run` (continuous), config at `/etc/watchtower/agent.toml`
@@ -38,6 +41,8 @@ Control plane core (`watchtower-server`):
 - Web UI at `http://127.0.0.1:8787/` (token prompt; evidence expandable).
   Serve from the repo root, or set `WATCHTOWER_UI_DIR` for installed deploys.
 - Integration check: `./scripts/integration-test.sh`
+- M3 security sensors: see M1 status above. Config keys: `watch_paths`,
+  `ssh_brute_threshold`, `ssh_brute_window_secs` in agent.toml.
 
 Incidents, correlation, notifications: M4.
 
