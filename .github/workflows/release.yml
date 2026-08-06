@@ -1,0 +1,38 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    # x86_64 only: release.sh builds the C deps (ring, etc.) with the
+    # runner's native gcc. aarch64-unknown-linux-gnu needs a cross C
+    # toolchain (e.g. the `cross` crate or a zig wrapper) — add the
+    # target back once that is wired up.
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: TARGETS="${{ matrix.target }}" sh scripts/release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: watchtower-${{ matrix.target }}
+          path: dist/*.tar.gz
+      - run: cat dist/SHA256SUMS
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
