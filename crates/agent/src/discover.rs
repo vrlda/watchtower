@@ -84,7 +84,9 @@ pub fn run_all(
 
 #[allow(dead_code)]
 pub fn detect_distro(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(root.join("os-release")).ok()?;
+    let text = std::fs::read_to_string(root.join("etc/os-release"))
+        .or_else(|_| std::fs::read_to_string(root.join("os-release")))
+        .ok()?;
     text.lines()
         .find_map(|l| l.strip_prefix("PRETTY_NAME="))
         .map(|v| v.trim_matches('"').to_string())
@@ -261,7 +263,22 @@ mod tests {
     fn detects_distro() {
         assert!(detect_distro(&root())
             .unwrap_or_default()
-            .contains("Ubuntu"));
+            .contains("Debian"));
+    }
+
+    #[test]
+    fn detects_distro_from_etc() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/discover");
+        assert!(detect_distro(&root).unwrap_or_default().contains("Debian"));
+    }
+
+    #[test]
+    fn falls_back_to_top_level_os_release() {
+        let dir = std::env::temp_dir().join(format!("discover-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("os-release"), "PRETTY_NAME=\"Fallback OS\"\n").unwrap();
+        assert_eq!(detect_distro(&dir).unwrap(), "Fallback OS");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

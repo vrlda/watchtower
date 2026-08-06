@@ -90,7 +90,7 @@ fn main() {
             }
         }
         Cmd::Discover => {
-            let discover_procfs = procfs::ProcFs::new(PathBuf::from("/"));
+            let discover_procfs = procfs::ProcFs::new(PathBuf::from("/proc"));
             for check in
                 discover::run_all(&PathBuf::from("/"), runners.sys.as_ref(), &discover_procfs)
             {
