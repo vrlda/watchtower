@@ -133,9 +133,11 @@ pub struct AgentState {
     pub ssh_seen: SeenIps,
     pub ssh_brute: BruteForceTracker,
     pub net: NetState,
-    /// Last journal line timestamp seen, unix SECONDS (journalctl @since arg
-    /// domain).
-    pub journal_since: i64,
+    /// Journal read cursor in unix MILLIS: the max line ts_ms seen. The
+    /// journalctl @since arg (seconds) is derived as journal_since_ms / 1000.
+    /// Lines with ts_ms <= cursor are skipped, so a line is never processed
+    /// twice — even when the newest line is re-read on every poll.
+    pub journal_since_ms: i64,
     /// FIM watcher channel (None when no files are watched).
     pub fim_rx: Option<Receiver<FimEvent>>,
 }
@@ -148,7 +150,7 @@ impl AgentState {
             ssh_seen: SeenIps::default(),
             ssh_brute: BruteForceTracker::new(cfg.ssh_brute_threshold, cfg.ssh_brute_window_secs),
             net: NetState::default(),
-            journal_since: 0,
+            journal_since_ms: 0,
             fim_rx: None,
         }
     }
@@ -208,14 +210,16 @@ pub fn run_once(
     }
 
     // ssh/auth sensor (journald)
-    let since = state.journal_since;
-    if let Ok(lines) = crate::journald::read_since(journal, since, 0) {
-        let mut max_ts = since;
+    let since_ms = state.journal_since_ms;
+    if let Ok(lines) = crate::journald::read_since(journal, since_ms / 1000, 0) {
         for line in &lines {
-            let secs = line.ts_ms / 1000;
-            if secs > max_ts {
-                max_ts = secs;
+            // ms cursor: a line at or before the cursor was already processed.
+            // Skipping <= (not <) means a line at exactly the cursor ms is not
+            // re-read, so advancing to max(seen) never re-processes anything.
+            if line.ts_ms <= state.journal_since_ms {
+                continue;
             }
+            state.journal_since_ms = state.journal_since_ms.max(line.ts_ms);
             if let Some(auth) = classify(line) {
                 match auth.kind {
                     AuthKind::SshFailed => {
@@ -224,7 +228,10 @@ pub fn run_once(
                             .observe_failure(&auth.user, &auth.ip, line.ts_ms);
                         if episode {
                             evs.push(AgentEvent {
-                                id: format!("brute-{}-{}", auth.user, auth.ip),
+                                id: format!(
+                                    "brute-{}-{}-{}-{}",
+                                    host_id, auth.user, auth.ip, line.ts_ms
+                                ),
                                 ts: line.ts_ms,
                                 host_id: host_id.into(),
                                 key: format!("ssh:brute:{}:{}", auth.user, auth.ip),
@@ -303,7 +310,6 @@ pub fn run_once(
                 }
             }
         }
-        state.journal_since = max_ts;
     }
 
     // netflow sensor
@@ -455,10 +461,19 @@ mod tests {
         assert!(evs
             .iter()
             .any(|e| e.kind == EventKind::NewOutboundConnection));
+        // brute ids must be unique per (host, user, ip, ts) — the server
+        // INSERT OR IGNOREs on id, so a second episode for the same user+ip
+        // (or a second host brute-forced from the same ip) must not collide.
+        let brute = evs
+            .iter()
+            .find(|e| e.kind == EventKind::SshBruteForce)
+            .unwrap();
+        assert!(brute.id.contains("h-1-"));
+        assert!(brute.id.contains(&brute.ts.to_string()));
     }
 
     #[test]
-    fn run_once_tracks_journal_since_across_polls() {
+    fn run_once_journal_cursor_advances_beyond_max_line() {
         let mut state = AgentState::for_tests();
         let runner = FakeSys {
             journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted publickey for deploy from 198.51.100.24 port 51234 ssh2"}"#.to_string(),
@@ -477,7 +492,9 @@ mod tests {
             &mut state,
         );
         assert!(evs.iter().any(|e| e.kind == EventKind::SshLogin));
-        assert_eq!(state.journal_since, 1_758_000_000);
+        assert_eq!(state.journal_since_ms, 1_758_000_000_100);
+        // the fake returns the same line forever; the ms cursor must skip it —
+        // no ssh events AND no new seen-ip state mutation on the 2nd poll
         let evs = run_once(
             &cfg,
             &mut deduper,
@@ -489,6 +506,52 @@ mod tests {
             &mut state,
         );
         assert!(!evs.iter().any(|e| e.kind == EventKind::SshLogin));
+        assert_eq!(state.journal_since_ms, 1_758_000_000_100);
+    }
+
+    #[test]
+    fn run_once_phantom_failures_do_not_feed_brute_tracker() {
+        let cfg = Config {
+            ssh_brute_threshold: 2,
+            ssh_brute_window_secs: 300,
+            ..Default::default()
+        };
+        let mut deduper = Deduper::new(300);
+        let mut state = AgentState::new(&cfg, "h-1");
+        let p = fixture_procfs();
+        let runner = FakeSys {
+            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40000 ssh2"}"#.to_string(),
+        };
+        // poll 1: 1 failure counted, no episode (threshold 2)
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_002_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        assert!(!evs.iter().any(|e| e.kind == EventKind::SshBruteForce));
+        // polls 2-3 re-read the same line: without the ms cursor each poll
+        // feeds a phantom failure → episode fires on poll 2. With it: nothing.
+        for _ in 0..2 {
+            let evs = run_once(
+                &cfg,
+                &mut deduper,
+                "h-1",
+                1_758_000_004_000,
+                &p,
+                &runner,
+                &runner,
+                &mut state,
+            );
+            assert!(
+                !evs.iter().any(|e| e.kind == EventKind::SshBruteForce),
+                "phantom episode fired"
+            );
+        }
     }
 
     #[test]

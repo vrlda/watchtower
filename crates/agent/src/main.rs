@@ -63,6 +63,10 @@ fn main() {
     match cli.cmd {
         Cmd::Check => {
             let mut state = engine::AgentState::new(&cfg, &host_id);
+            // Seed the journal cursor to now (ms): a one-shot check reads the
+            // journal from now forward — without the seed, the full-journal
+            // read since epoch would blow the 10s timeout.
+            state.journal_since_ms = now_ms();
             let evs = engine::run_once(
                 &cfg,
                 &mut engine::Deduper::new(cfg.dedup_secs),
@@ -87,9 +91,9 @@ fn main() {
         Cmd::Run => {
             let mut deduper = engine::Deduper::new(cfg.dedup_secs);
             let mut state = engine::AgentState::new(&cfg, &host_id);
-            // Seed the journal cursor to now: reading the whole journal since
-            // epoch on first start would blow the 10s timeout.
-            state.journal_since = now_ms() / 1000;
+            // Seed the journal cursor to now (ms): reading the whole journal
+            // since epoch on first start would blow the 10s timeout.
+            state.journal_since_ms = now_ms();
             #[cfg(target_os = "linux")]
             if !cfg.watch_paths.is_empty() {
                 let (tx, rx) = std::sync::mpsc::channel();
