@@ -188,7 +188,11 @@ pub fn resolve_chat_id(api_base: &str, token: &str) -> Result<Option<i64>, Strin
 /// Send a text message to the bot's chat, resolving the chat if unknown.
 /// Ok(false) = no chat registered yet (message the bot once).
 pub fn telegram_send(client: &TelegramClient, api_base: &str, text: &str) -> Result<bool, String> {
-    let chat = match *client.chat_id.lock().unwrap() {
+    let known = {
+        let guard = client.chat_id.lock().unwrap();
+        *guard
+    };
+    let chat = match known {
         Some(c) => c,
         None => match resolve_chat_id(api_base, &client.token)? {
             Some(c) => {
@@ -217,6 +221,10 @@ pub fn telegram_send(client: &TelegramClient, api_base: &str, text: &str) -> Res
 /// Module-level client built once from the configured token. Token changes
 /// require a restart (documented).
 static TELEGRAM: std::sync::OnceLock<TelegramClient> = std::sync::OnceLock::new();
+
+/// Log the missing-token misconfig once per process, not per incident.
+static TELEGRAM_MISCONFIG_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub fn telegram_client(token: Option<&str>) -> Option<&'static TelegramClient> {
     let token = token?;
@@ -275,8 +283,10 @@ pub async fn notify_incident(
             match cfg.telegram_token.as_deref() {
                 None => {
                     // telegram-only default routing + no token = silent
-                    // black hole; make the misconfig self-evident
-                    eprintln!("telegram channel configured but TELEGRAM_BOT_TOKEN is not set");
+                    // black hole; make the misconfig self-evident (once)
+                    if !TELEGRAM_MISCONFIG_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        eprintln!("telegram channel configured but TELEGRAM_BOT_TOKEN is not set");
+                    }
                     continue;
                 }
                 Some(token) => {
@@ -671,6 +681,76 @@ mod tests {
         let base = format!("http://{}", addr);
         let chat = resolve_chat_id(&base, "tok").unwrap();
         assert_eq!(chat, Some(12345));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn telegram_send_resolves_chat_when_unknown() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_millis(5000)))
+                    .unwrap();
+                let mut buf = [0u8; 65536];
+                let mut got = 0;
+                let mut total = usize::MAX; // full request: headers + body
+                loop {
+                    if got >= total {
+                        break;
+                    }
+                    match stream.read(&mut buf[got..]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            got += n;
+                            if total == usize::MAX {
+                                if let Some(end) =
+                                    buf[..got].windows(4).position(|w| w == b"\r\n\r\n")
+                                {
+                                    let head_end = end + 4;
+                                    let head = String::from_utf8_lossy(&buf[..end]);
+                                    let clen = head
+                                        .lines()
+                                        .find_map(|l| {
+                                            let (name, value) = l.split_once(':')?;
+                                            name.trim()
+                                                .eq_ignore_ascii_case("content-length")
+                                                .then(|| value.trim().parse::<usize>().unwrap_or(0))
+                                        })
+                                        .unwrap_or(0);
+                                    total = head_end + clen;
+                                }
+                            }
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf[..got]).into_owned();
+                let body = if req.starts_with("GET /bottok/getUpdates") {
+                    r#"{"ok":true,"result":[{"update_id":1,"message":{"chat":{"id":12345}}}]}"#
+                        .to_string()
+                } else {
+                    r#"{"ok":true,"result":{}}"#.to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+        let base = format!("http://{}", addr);
+        let client = TelegramClient::new("tok".into());
+        assert_eq!(*client.chat_id.lock().unwrap(), None);
+        let ok = telegram_send(&client, &base, "hello").unwrap();
+        assert!(ok);
+        assert_eq!(
+            *client.chat_id.lock().unwrap(),
+            Some(12345),
+            "chat resolved and cached"
+        );
         handle.join().unwrap();
     }
 }

@@ -9,7 +9,8 @@ pub fn usage_pct(total: u64, free: u64) -> f64 {
     if total == 0 {
         return 0.0;
     }
-    (total - free) as f64 / total as f64 * 100.0
+    let used = total.saturating_sub(free);
+    used as f64 / total as f64 * 100.0
 }
 
 pub fn disk_severity(pct: f64, cfg: &Config) -> Severity {
@@ -107,6 +108,7 @@ mod tests {
         assert_eq!(usage_pct(100, 25), 75.0);
         assert_eq!(usage_pct(100, 0), 100.0);
         assert_eq!(usage_pct(0, 0), 0.0);
+        assert_eq!(usage_pct(100, 150), 0.0, "free > total clamps to 0");
     }
 
     #[test]
