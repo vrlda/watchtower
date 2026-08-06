@@ -55,6 +55,29 @@ curl -fsS -H "Authorization: Bearer $TOKEN" \
 EVENTS=$(curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/events?host=itest-host")
 echo "$EVENTS" | grep -q '"summary":"integration event"' && echo "OK event stored"
 
+echo "==> verifying incidents round-trip"
+NOW_MS=$(( $(date +%s) * 1000 ))
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"batch\":[
+    {\"id\":\"d-ssh\",\"ts\":$((NOW_MS - 150000)),\"host_id\":\"itest-host\",\"key\":\"ssh:login:deploy\",\"kind\":\"SshLogin\",\"severity\":\"Warning\",\"summary\":\"ssh\",\"evidence\":[]},
+    {\"id\":\"d-fim\",\"ts\":$((NOW_MS - 100000)),\"host_id\":\"itest-host\",\"key\":\"fim:/etc/x\",\"kind\":\"FileChanged\",\"severity\":\"Warning\",\"summary\":\"fim\",\"evidence\":[]},
+    {\"id\":\"d-fail\",\"ts\":$((NOW_MS - 50000)),\"host_id\":\"itest-host\",\"key\":\"svc:myapp.service\",\"kind\":\"ServiceFailed\",\"severity\":\"Critical\",\"summary\":\"fail\",\"evidence\":[]}
+  ]}" \
+  "http://127.0.0.1:$PORT/v1/telemetry" >/dev/null
+INCIDENT=""
+for i in $(seq 1 15); do
+  INCS=$(curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/incidents" || true)
+  INCIDENT=$(echo "$INCS" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4) || true
+  if [ -n "$INCIDENT" ]; then break; fi
+  sleep 2
+done
+[ -n "$INCIDENT" ] || { echo "FAILED: no incident after demo batch" >&2; exit 1; }
+echo "OK incident created: $INCIDENT"
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/incidents/$INCIDENT/ack" >/dev/null
+STATUS=$(curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/incidents/$INCIDENT" | grep -o '"status":"[^"]*"' | head -1) || true
+[ "$STATUS" = '"status":"acknowledged"' ] && echo "OK incident acked"
+
 echo "==> verifying auth rejection"
 CODE=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/v1/hosts")
 [ "$CODE" = "401" ] && echo "OK unauthorized rejected"
