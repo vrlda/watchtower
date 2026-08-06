@@ -17,6 +17,8 @@ struct ServerConfigToml {
     #[serde(default)]
     probes: Vec<ProbeConfig>,
     scan_interval_secs: Option<i64>,
+    #[serde(default)]
+    rule: Vec<crate::correlation::Rule>,
     rules: Option<Vec<crate::correlation::Rule>>,
 }
 
@@ -25,13 +27,15 @@ impl From<ServerConfigToml> for ServerConfig {
         let defaults = ServerConfig::default();
         let mut probes = t.probe;
         probes.extend(t.probes);
+        let mut rules = t.rule;
+        rules.extend(t.rules.unwrap_or_default());
         ServerConfig {
             listen: t.listen.unwrap_or(defaults.listen),
             db_url: t.db_url.unwrap_or(defaults.db_url),
             auth_token: t.auth_token.unwrap_or(defaults.auth_token),
             probes,
             scan_interval_secs: t.scan_interval_secs.unwrap_or(defaults.scan_interval_secs),
-            rules: t.rules.unwrap_or_default(),
+            rules,
         }
     }
 }
@@ -108,5 +112,14 @@ mod tests {
         assert_eq!(cfg.probes.len(), 2);
         assert_eq!(cfg.probes[0].url, "http://a");
         assert_eq!(cfg.probes[1].url, "http://b");
+    }
+
+    #[test]
+    fn rules_accept_both_toml_keys() {
+        let raw = "[[rule]]\nid = \"a\"\ntrigger = \"CpuSpike\"\nseverity = \"Warning\"\nheadline = \"x\"\n[[rules]]\nid = \"b\"\ntrigger = \"CpuSpike\"\nseverity = \"Warning\"\nheadline = \"y\"\n";
+        let cfg: ServerConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.rules.len(), 2);
+        assert_eq!(cfg.rules[0].id, "a");
+        assert_eq!(cfg.rules[1].id, "b");
     }
 }

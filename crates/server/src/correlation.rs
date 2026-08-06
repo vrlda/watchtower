@@ -162,7 +162,14 @@ pub fn match_rule(
     let window_start = now - rule.window_secs * 1000;
     let in_window: Vec<&AgentEvent> = events
         .iter()
-        .filter(|e| !exclude.contains(&e.id) && e.ts >= window_start && e.ts <= now)
+        .filter(|e| {
+            !exclude.contains(&e.id)
+                && e.ts >= window_start
+                && e.ts <= now
+                && (e.kind == rule.trigger
+                    || rule.supporting.contains(&e.kind)
+                    || rule.absorb_only.contains(&e.kind))
+        })
         .collect();
     let trigger = in_window.iter().find(|e| e.kind == rule.trigger)?;
     let supporting_count = in_window
@@ -292,6 +299,12 @@ pub async fn scan_and_absorb(
         by_host.entry(e.host_id.clone()).or_default().push(e);
     }
     let mut changed = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let fallback_cooldown = rules
+        .iter()
+        .find(|r| r.is_fallback)
+        .map(|r| r.cooldown_secs * 1000)
+        .unwrap_or(300_000);
 
     for (host, host_events) in by_host {
         let mut matched_event_ids: std::collections::HashSet<String> = Default::default();
@@ -328,7 +341,9 @@ pub async fn scan_and_absorb(
             if new_links > 0 {
                 incidents::touch_incident(pool, &inc.id).await?;
                 let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
-                changed.push(inc);
+                if seen.insert(inc.id.clone()) {
+                    changed.push(inc);
+                }
             }
         }
         // fallback pass: Warning+ events NOT matched by any rule
@@ -343,9 +358,11 @@ pub async fn scan_and_absorb(
                 if new_links > 0 {
                     incidents::touch_incident(pool, &open.id).await?;
                     let inc = incidents::fetch_incident(pool, &open.id).await?.unwrap();
-                    changed.push(inc);
+                    if seen.insert(inc.id.clone()) {
+                        changed.push(inc);
+                    }
                 }
-            } else if !recently_resolved(pool, &draft.key, now, 300_000).await? {
+            } else if !recently_resolved(pool, &draft.key, now, fallback_cooldown).await? {
                 let inc = incidents::create_incident(
                     pool,
                     &draft.key,
@@ -359,7 +376,9 @@ pub async fn scan_and_absorb(
                 .await?;
                 incidents::link_events(pool, &inc.id, &draft.events).await?;
                 let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
-                changed.push(inc);
+                if seen.insert(inc.id.clone()) {
+                    changed.push(inc);
+                }
             }
         }
     }
@@ -389,7 +408,7 @@ pub async fn recently_resolved(
 /// Spawn the correlation loop: scan every interval, notify on changes
 /// (notify wiring lands in Task 8; log for now).
 pub fn spawn_runner(state: crate::app::AppState) {
-    let interval = state.cfg.scan_interval_secs.max(5);
+    let interval = state.cfg.scan_interval_secs.max(5); // clamp: never scan faster than every 5s
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval as u64));
         ticker.tick().await; // skip immediate
