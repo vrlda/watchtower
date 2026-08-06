@@ -57,11 +57,12 @@ fn main() {
     let host_id = resolve_host_id(&cfg);
     let procfs = procfs::ProcFs::new(PathBuf::from("/proc"));
     let sys = cmd::SystemCtl;
+    let journal = cmd::JournalCtl;
     let spool = telemetry::Spool::new(PathBuf::from(&cfg.spool_dir));
 
     match cli.cmd {
         Cmd::Check => {
-            let mut cpu = engine::CpuState::new(20, cfg.cpu_spike_ratio, &host_id);
+            let mut state = engine::AgentState::new(&cfg, &host_id);
             let evs = engine::run_once(
                 &cfg,
                 &mut engine::Deduper::new(cfg.dedup_secs),
@@ -69,8 +70,8 @@ fn main() {
                 now_ms(),
                 &procfs,
                 &sys,
-                &mut sensors::systemd::CrashTracker::new(120),
-                &mut cpu,
+                &journal,
+                &mut state,
             );
             for ev in &evs {
                 println!("{}", serde_json::to_string(ev).unwrap());
@@ -85,8 +86,27 @@ fn main() {
         }
         Cmd::Run => {
             let mut deduper = engine::Deduper::new(cfg.dedup_secs);
-            let mut crash = sensors::systemd::CrashTracker::new(120);
-            let mut cpu = engine::CpuState::new(20, cfg.cpu_spike_ratio, &host_id);
+            let mut state = engine::AgentState::new(&cfg, &host_id);
+            // Seed the journal cursor to now: reading the whole journal since
+            // epoch on first start would blow the 10s timeout.
+            state.journal_since = now_ms() / 1000;
+            #[cfg(target_os = "linux")]
+            if !cfg.watch_paths.is_empty() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                if crate::sensors::fim::spawn_watcher(
+                    cfg.watch_paths
+                        .iter()
+                        .map(|p| crate::sensors::fim_types::WatchedFile::new(p))
+                        .collect(),
+                    tx,
+                )
+                .is_ok()
+                {
+                    state.fim_rx = Some(rx);
+                } else {
+                    eprintln!("fim watcher failed to start");
+                }
+            }
             let mut last_heartbeat = Instant::now() - Duration::from_secs(cfg.heartbeat_secs + 1);
             loop {
                 let evs = engine::run_once(
@@ -96,8 +116,8 @@ fn main() {
                     now_ms(),
                     &procfs,
                     &sys,
-                    &mut crash,
-                    &mut cpu,
+                    &journal,
+                    &mut state,
                 );
                 if !evs.is_empty() && !cfg.server_url.is_empty() {
                     match telemetry::post_batch(&cfg.server_url, &cfg.token, &evs) {

@@ -5,14 +5,16 @@ use wt_common::{AgentEvent, EventKind, Evidence, Severity};
 /// One watched file. The PARENT directory is watched so atomic-replace
 /// (rename over) edits are caught; events are filtered by filename.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired in engine Task 6
+// watched files are wired on linux (main.rs + fim.rs); on other targets the
+// watcher is compiled out so the type would be dead
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct WatchedFile {
     pub path: PathBuf,
     file_name: String,
 }
 
 impl WatchedFile {
-    #[allow(dead_code)] // wired in engine Task 6
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn new(path: &str) -> Self {
         let p = PathBuf::from(path);
         let file_name = p
@@ -22,13 +24,13 @@ impl WatchedFile {
         WatchedFile { path: p, file_name }
     }
 
-    #[allow(dead_code)] // wired in engine Task 6
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn parent(&self) -> PathBuf {
         self.path.parent().unwrap_or(Path::new("/")).to_path_buf()
     }
 
     /// Does an inotify name event concern the watched file?
-    #[allow(dead_code)] // wired in engine Task 6
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn relevant(&self, name: Option<&std::ffi::OsStr>) -> bool {
         name.map(|n| n.to_string_lossy() == self.file_name)
             .unwrap_or(false)
@@ -37,19 +39,17 @@ impl WatchedFile {
 
 /// A raw change observed by the watcher thread.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // wired in engine Task 6
 pub struct FimEvent {
     pub path: String,
     pub action: String,
 }
 
 /// Build the agent event for a FimEvent.
-#[allow(dead_code)] // wired in engine Task 6
-pub fn change_event(path: &str, action: &str, ts: i64) -> AgentEvent {
+pub fn change_event(path: &str, action: &str, ts: i64, host_id: &str) -> AgentEvent {
     AgentEvent {
         id: format!("fim-{}-{}", path, ts),
         ts,
-        host_id: "h".into(),
+        host_id: host_id.into(),
         key: format!("fim:{}", path),
         kind: EventKind::FileChanged,
         severity: Severity::Warning,
@@ -63,7 +63,8 @@ pub fn change_event(path: &str, action: &str, ts: i64) -> AgentEvent {
 }
 
 /// Human-readable name for the masks we care about (inotify event bits).
-#[allow(dead_code)] // wired in engine Task 6
+// used by the inotify watcher (linux) and unit tests
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn mask_name(flags: u32) -> String {
     let mut parts = Vec::new();
     if flags & 0x8 != 0 {
@@ -100,7 +101,7 @@ mod tests {
 
     #[test]
     fn change_event_formatting() {
-        let ev = change_event("/etc/myapp/config.yml", "CLOSE_WRITE", 1234);
+        let ev = change_event("/etc/myapp/config.yml", "CLOSE_WRITE", 1234, "h");
         assert_eq!(ev.kind, EventKind::FileChanged);
         assert_eq!(ev.severity, Severity::Warning);
         assert_eq!(ev.key, "fim:/etc/myapp/config.yml");

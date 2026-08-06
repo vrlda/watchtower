@@ -4,7 +4,6 @@ use crate::journald::JournalLine;
 use wt_common::Severity;
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // wired in engine Task 6
 pub enum AuthKind {
     SshLogin,
     SshFailed,
@@ -14,7 +13,6 @@ pub enum AuthKind {
 
 /// One classified auth-related journal line.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // wired in engine Task 6
 pub struct AuthEvent {
     pub kind: AuthKind,
     pub user: String,
@@ -24,7 +22,6 @@ pub struct AuthEvent {
 
 /// Classify a journal line into an auth event, or None for unrelated lines.
 /// Recognized message shapes (sshd, sudo, su) mirror the fixture set.
-#[allow(dead_code)] // wired in engine Task 6
 pub fn classify(line: &JournalLine) -> Option<AuthEvent> {
     let msg = line.message.as_str();
     match line.ident.as_str() {
@@ -134,13 +131,11 @@ fn parse_user_ip(rest: &str) -> Option<(&str, &str)> {
 /// First-seen source IP tracking. In-memory only — a restart resets history
 /// (documented debt; persistence is post-MVP).
 #[derive(Default)]
-#[allow(dead_code)] // wired in engine Task 6
 pub struct SeenIps {
     ips: HashSet<String>,
 }
 
 impl SeenIps {
-    #[allow(dead_code)] // wired in engine Task 6
     pub fn is_first(&mut self, ip: &str) -> bool {
         self.ips.insert(ip.to_string())
     }
@@ -148,7 +143,6 @@ impl SeenIps {
 
 /// Brute-force episode detection per (user, ip): failures within a window;
 /// at threshold the episode fires and resets.
-#[allow(dead_code)] // wired in engine Task 6
 pub struct BruteForceTracker {
     threshold: u32,
     window_secs: u64,
@@ -156,7 +150,6 @@ pub struct BruteForceTracker {
 }
 
 impl BruteForceTracker {
-    #[allow(dead_code)] // wired in engine Task 6
     pub fn new(threshold: u32, window_secs: u64) -> Self {
         BruteForceTracker {
             threshold,
@@ -166,7 +159,6 @@ impl BruteForceTracker {
     }
 
     /// Record a failure at ts_ms. Returns (episode_completed, count_in_window).
-    #[allow(dead_code)] // wired in engine Task 6
     pub fn observe_failure(&mut self, user: &str, ip: &str, ts_ms: i64) -> (bool, usize) {
         let key = (user.to_string(), ip.to_string());
         let list = self.failures.entry(key.clone()).or_default();
@@ -185,7 +177,6 @@ impl BruteForceTracker {
 /// Severity helpers for auth events. Login severity is decided by the caller
 /// at construction (SshLogin=Info, RootLogin=Warning); suggest_severity only
 /// escalates when the source IP is new (Critical cap).
-#[allow(dead_code)] // wired in engine Task 6
 pub fn base_ssh_event(user: &str, ip: &str, sev: Severity) -> SshEventBuilder {
     SshEventBuilder {
         user: user.to_string(),
@@ -194,9 +185,11 @@ pub fn base_ssh_event(user: &str, ip: &str, sev: Severity) -> SshEventBuilder {
     }
 }
 
-#[allow(dead_code)] // wired in engine Task 6
 pub struct SshEventBuilder {
+    // stored for callers that want them; severity escalation is sev-only
+    #[allow(dead_code)]
     pub user: String,
+    #[allow(dead_code)]
     pub ip: String,
     pub sev: Severity,
 }
@@ -204,7 +197,6 @@ pub struct SshEventBuilder {
 impl SshEventBuilder {
     /// Pure — no mutation of any tracker. Escalate one level on a new
     /// source IP, capped at Critical.
-    #[allow(dead_code)] // wired in engine Task 6
     pub fn suggest_severity(&self, ip_is_new: bool) -> Severity {
         if !ip_is_new {
             return self.sev;

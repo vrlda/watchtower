@@ -6,8 +6,6 @@ use wt_common::{AgentEvent, EventKind, Evidence, Severity};
 
 /// Snapshot state for network monitoring: previous listen/remote sets and a
 /// rolling detector on the established-connection count.
-// wired in engine Task 6
-#[allow(dead_code)]
 pub struct NetState {
     prev_listen: HashSet<String>,
     prev_remote: HashSet<String>,
@@ -28,9 +26,7 @@ impl Default for NetState {
 
 impl NetState {
     /// Observe the current network state at ts_ms; emit events for changes.
-    // wired in engine Task 6
-    #[allow(dead_code)]
-    pub fn observe(&mut self, p: &ProcFs, ts: i64) -> Vec<AgentEvent> {
+    pub fn observe(&mut self, p: &ProcFs, ts: i64, host_id: &str) -> Vec<AgentEvent> {
         let mut evs = Vec::new();
         let listen: HashSet<String> = entries(p, "LISTEN")
             .into_iter()
@@ -47,8 +43,7 @@ impl NetState {
             evs.push(AgentEvent {
                 id: format!("port-{}-{}", new, ts),
                 ts,
-                // host_id parameterized in engine Task 6
-                host_id: "h".into(),
+                host_id: host_id.into(),
                 key: format!("port:{}", new),
                 kind: EventKind::NewListeningPort,
                 severity: Severity::Warning,
@@ -64,8 +59,7 @@ impl NetState {
             evs.push(AgentEvent {
                 id: format!("out-{}-{}", new, ts),
                 ts,
-                // host_id parameterized in engine Task 6
-                host_id: "h".into(),
+                host_id: host_id.into(),
                 key: format!("net:out:{}", new),
                 kind: EventKind::NewOutboundConnection,
                 severity: Severity::Warning,
@@ -83,8 +77,7 @@ impl NetState {
             evs.push(AgentEvent {
                 id: format!("rate-{}", ts),
                 ts,
-                // host_id parameterized in engine Task 6
-                host_id: "h".into(),
+                host_id: host_id.into(),
                 key: "net:rate".into(),
                 kind: EventKind::ConnectionRateSpike,
                 severity: Severity::Warning,
@@ -104,8 +97,6 @@ impl NetState {
     }
 }
 
-// wired in engine Task 6
-#[allow(dead_code)]
 fn entries(p: &ProcFs, state: &str) -> Vec<TcpEntry> {
     let mut out = Vec::new();
     for e in p
@@ -137,7 +128,7 @@ mod tests {
     fn new_listening_port_and_outbound_emitted_then_quiet() {
         let p = procfs();
         let mut state = NetState::default();
-        let evs = state.observe(&p, 1000);
+        let evs = state.observe(&p, 1000, "h-1");
         let port_ev = evs
             .iter()
             .find(|e| e.key == "port:tcp:127.0.0.1:8080")
@@ -152,7 +143,7 @@ mod tests {
         assert_eq!(out_ev.severity, Severity::Warning);
         assert!(evs.iter().any(|e| e.key == "net:out:127.0.0.1"));
         // second observation with identical state: nothing new
-        let evs = state.observe(&p, 2000);
+        let evs = state.observe(&p, 2000, "h-1");
         assert!(evs.is_empty());
     }
 

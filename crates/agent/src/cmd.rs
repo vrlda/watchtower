@@ -4,7 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub trait CommandRunner {
-    #[allow(dead_code)] // wired in engine Task 6
+    // never called in non-test code; kept as part of the interface contract
+    #[allow(dead_code)]
     fn program(&self) -> &'static str;
     fn run(&self, args: &[&str]) -> Result<String, String>;
 }
@@ -29,7 +30,6 @@ impl CommandRunner for SystemCtl {
     }
 }
 
-#[allow(dead_code)] // wired in engine Task 6
 pub struct JournalCtl;
 
 impl CommandRunner for JournalCtl {

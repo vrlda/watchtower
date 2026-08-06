@@ -4,11 +4,11 @@ use crate::cmd::CommandRunner;
 
 /// One journal entry, reduced to what the sensors need.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // wired in engine Task 6
 pub struct JournalLine {
     /// Unix millis (journal __REALTIME_TIMESTAMP is microseconds; /1000).
     pub ts_ms: i64,
     pub ident: String,
+    #[allow(dead_code)] // parsed for completeness; no sensor reads it yet
     pub pid: i64,
     pub message: String,
 }
@@ -16,7 +16,6 @@ pub struct JournalLine {
 /// Parse journalctl -o json output: one JSON object per line.
 /// Accepts either a file path or raw text. Non-JSON and empty lines are
 /// skipped (fail-open).
-#[allow(dead_code)] // wired in engine Task 6
 pub fn parse_journal(path_or_text: &str) -> Result<Vec<JournalLine>, String> {
     let text = if Path::new(path_or_text).exists() {
         std::fs::read_to_string(path_or_text).map_err(|e| e.to_string())?
@@ -61,7 +60,6 @@ pub fn parse_journal(path_or_text: &str) -> Result<Vec<JournalLine>, String> {
 
 /// Poll journalctl for lines with realtime timestamp >= since (unix seconds).
 /// journalctl returns nothing (exit 0) when there are no new entries.
-#[allow(dead_code)] // wired in engine Task 6
 pub fn read_since(
     runner: &dyn CommandRunner,
     since_secs: i64,

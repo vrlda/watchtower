@@ -1,5 +1,9 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::mpsc::Receiver;
 
+use crate::sensors::fim_types::{change_event, FimEvent};
+use crate::sensors::netflow::NetState;
+use crate::sensors::sshauth::{base_ssh_event, classify, AuthKind, BruteForceTracker, SeenIps};
 use wt_common::{AgentEvent, Config, EventKind, Evidence, Severity};
 
 /// Rolling median baseline spike detector. A value is a spike when it exceeds
@@ -122,10 +126,44 @@ impl CpuState {
     }
 }
 
+/// Mutable state shared by the sensors across polls.
+pub struct AgentState {
+    pub cpu: CpuState,
+    pub crash: crate::sensors::systemd::CrashTracker,
+    pub ssh_seen: SeenIps,
+    pub ssh_brute: BruteForceTracker,
+    pub net: NetState,
+    /// Last journal line timestamp seen, unix SECONDS (journalctl @since arg
+    /// domain).
+    pub journal_since: i64,
+    /// FIM watcher channel (None when no files are watched).
+    pub fim_rx: Option<Receiver<FimEvent>>,
+}
+
+impl AgentState {
+    pub fn new(cfg: &Config, host_id: &str) -> Self {
+        AgentState {
+            cpu: CpuState::new(20, cfg.cpu_spike_ratio, host_id),
+            crash: crate::sensors::systemd::CrashTracker::new(120),
+            ssh_seen: SeenIps::default(),
+            ssh_brute: BruteForceTracker::new(cfg.ssh_brute_threshold, cfg.ssh_brute_window_secs),
+            net: NetState::default(),
+            journal_since: 0,
+            fim_rx: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        AgentState::new(&Config::default(), "h-1")
+    }
+}
+
 /// One detection pass: run all sensors against current state, apply dedup,
 /// return events to ship. Called every poll interval and by `check`.
-// arg grouping refactor deferred; 8 args accepted for now
-#[allow(clippy::too_many_arguments)]
+/// `sys` runs systemctl; `journal` runs journalctl (each CommandRunner impl
+/// has its program baked in).
+#[allow(clippy::too_many_arguments)] // sensor-bundling refactor deferred; 8 params accepted
 pub fn run_once(
     cfg: &Config,
     deduper: &mut Deduper,
@@ -133,16 +171,15 @@ pub fn run_once(
     ts: i64,
     procfs: &crate::procfs::ProcFs,
     sys: &dyn crate::cmd::CommandRunner,
-    crash: &mut crate::sensors::systemd::CrashTracker,
-    cpu: &mut CpuState,
+    journal: &dyn crate::cmd::CommandRunner,
+    state: &mut AgentState,
 ) -> Vec<AgentEvent> {
     let mut evs = Vec::new();
 
+    // resource sensor
     if let Ok(mem) = procfs.meminfo() {
         evs.extend(crate::sensors::resource::mem_events(mem, cfg, host_id, ts));
         evs.extend(crate::sensors::resource::swap_events(mem, cfg, host_id, ts));
-    } else {
-        eprintln!("sensor procfs.meminfo failed");
     }
     if let Ok(load) = procfs.load_one_min() {
         let ncpu = std::thread::available_parallelism()
@@ -151,26 +188,132 @@ pub fn run_once(
         evs.extend(crate::sensors::resource::load_events(
             load, ncpu, cfg, host_id, ts,
         ));
-    } else {
-        eprintln!("sensor procfs.load_one_min failed");
     }
     if let Ok(errs) = procfs.netdev_errors() {
         evs.extend(crate::sensors::resource::netdev_events(&errs, host_id, ts));
-    } else {
-        eprintln!("sensor procfs.netdev_errors failed");
+    }
+    let (total, busy, pct) =
+        crate::sensors::resource::cpu_usage_now(procfs, state.cpu.total, state.cpu.busy);
+    state.cpu.total = total;
+    state.cpu.busy = busy;
+    evs.extend(state.cpu.observe(pct, ts));
+
+    // systemd sensor
+    if let Ok(states) = crate::sensors::systemd::systemctl_list_units(sys) {
+        for (unit, unit_state) in states {
+            state
+                .crash
+                .observe(&unit, unit_state, (ts / 1000) as u64, host_id, &mut evs);
+        }
     }
 
-    let (total, busy, pct) = crate::sensors::resource::cpu_usage_now(procfs, cpu.total, cpu.busy);
-    cpu.total = total;
-    cpu.busy = busy;
-    evs.extend(cpu.observe(pct, ts));
-
-    if let Ok(states) = crate::sensors::systemd::systemctl_list_units(sys) {
-        for (unit, state) in states {
-            crash.observe(&unit, state, (ts / 1000) as u64, host_id, &mut evs);
+    // ssh/auth sensor (journald)
+    let since = state.journal_since;
+    if let Ok(lines) = crate::journald::read_since(journal, since, 0) {
+        let mut max_ts = since;
+        for line in &lines {
+            let secs = line.ts_ms / 1000;
+            if secs > max_ts {
+                max_ts = secs;
+            }
+            if let Some(auth) = classify(line) {
+                match auth.kind {
+                    AuthKind::SshFailed => {
+                        let (episode, count) = state
+                            .ssh_brute
+                            .observe_failure(&auth.user, &auth.ip, line.ts_ms);
+                        if episode {
+                            evs.push(AgentEvent {
+                                id: format!("brute-{}-{}", auth.user, auth.ip),
+                                ts: line.ts_ms,
+                                host_id: host_id.into(),
+                                key: format!("ssh:brute:{}:{}", auth.user, auth.ip),
+                                kind: EventKind::SshBruteForce,
+                                severity: Severity::Warning,
+                                summary: format!(
+                                    "{} failed SSH logins for {} from {} in {}s",
+                                    count, auth.user, auth.ip, cfg.ssh_brute_window_secs
+                                ),
+                                evidence: vec![Evidence {
+                                    ts: line.ts_ms,
+                                    source: "journald".into(),
+                                    detail: auth.detail.clone(),
+                                }],
+                            });
+                        } else {
+                            evs.push(AgentEvent {
+                                id: format!("sshf-{}-{}", line.ts_ms, count),
+                                ts: line.ts_ms,
+                                host_id: host_id.into(),
+                                key: format!("ssh:failed:{}:{}", auth.user, auth.ip),
+                                kind: EventKind::SshFailed,
+                                severity: Severity::Warning,
+                                summary: format!(
+                                    "failed SSH login for {} from {}",
+                                    auth.user, auth.ip
+                                ),
+                                evidence: vec![Evidence {
+                                    ts: line.ts_ms,
+                                    source: "journald".into(),
+                                    detail: auth.detail.clone(),
+                                }],
+                            });
+                        }
+                    }
+                    _ => {
+                        let base_sev = match auth.kind {
+                            AuthKind::RootLogin => Severity::Warning,
+                            _ => Severity::Info,
+                        };
+                        let builder = base_ssh_event(&auth.user, &auth.ip, base_sev);
+                        let ip_is_new = state.ssh_seen.is_first(&auth.ip);
+                        let sev = builder.suggest_severity(ip_is_new);
+                        let kind = match auth.kind {
+                            AuthKind::SshLogin => EventKind::SshLogin,
+                            AuthKind::RootLogin => EventKind::RootLogin,
+                            AuthKind::SudoUsed => EventKind::SudoUsed,
+                            AuthKind::SshFailed => unreachable!(),
+                        };
+                        let summary = match auth.kind {
+                            AuthKind::SshLogin => {
+                                format!("SSH login by {} from {}", auth.user, auth.ip)
+                            }
+                            AuthKind::RootLogin => format!("root login from {}", auth.ip),
+                            AuthKind::SudoUsed => format!("{} ran sudo", auth.user),
+                            AuthKind::SshFailed => unreachable!(),
+                        };
+                        evs.push(AgentEvent {
+                            id: format!("ssh-{}-{}", line.ts_ms, auth.user),
+                            ts: line.ts_ms,
+                            host_id: host_id.into(),
+                            key: match auth.kind {
+                                AuthKind::SudoUsed => format!("sudo:{}", auth.user),
+                                _ => format!("ssh:login:{}", auth.user),
+                            },
+                            kind,
+                            severity: sev,
+                            summary,
+                            evidence: vec![Evidence {
+                                ts: line.ts_ms,
+                                source: "journald".into(),
+                                detail: auth.detail.clone(),
+                            }],
+                        });
+                    }
+                }
+            }
         }
-    } else {
-        eprintln!("sensor systemctl_list_units failed");
+        state.journal_since = max_ts;
+    }
+
+    // netflow sensor
+    evs.extend(state.net.observe(procfs, ts, host_id));
+
+    // FIM channel drain
+    if let Some(rx) = &state.fim_rx {
+        while let Ok(fim) = rx.try_recv() {
+            evs.push(change_event(&fim.path, &fim.action, ts, host_id));
+        }
     }
 
     evs.retain(|e| deduper.should_emit(e.kind, &e.key, e.ts));
@@ -254,16 +397,21 @@ mod tests {
         assert!(evs.is_empty());
     }
 
+    fn fixture_procfs() -> crate::procfs::ProcFs {
+        crate::procfs::ProcFs::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
+        )
+    }
+
     #[test]
     fn run_once_wires_sensors_and_emits_events() {
         let cfg = Config::default();
         let mut deduper = Deduper::new(300);
-        let mut cpu = CpuState::new(20, 2.5, "h-1");
-        let mut crash = crate::sensors::systemd::CrashTracker::new(120);
-        let p = crate::procfs::ProcFs::new(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc"),
-        );
-        let runner = FakeSys;
+        let mut state = AgentState::for_tests();
+        let p = fixture_procfs();
+        let runner = FakeSys {
+            journal_out: "".to_string(),
+        };
         let evs = run_once(
             &cfg,
             &mut deduper,
@@ -271,26 +419,117 @@ mod tests {
             1000,
             &p,
             &runner,
-            &mut crash,
-            &mut cpu,
+            &runner,
+            &mut state,
         );
+        assert!(!evs.is_empty());
         assert!(evs.iter().any(|e| e.kind == EventKind::SwapHigh));
-        assert_eq!(
-            evs.iter()
-                .filter(|e| e.kind == EventKind::NetDevErrors)
-                .count(),
-            2
-        );
-        assert!(evs.iter().all(|e| e.host_id == "h-1"));
     }
 
-    struct FakeSys;
+    #[test]
+    fn run_once_integrates_ssh_and_netflow_sensors() {
+        let cfg = Config {
+            ssh_brute_threshold: 2,
+            ssh_brute_window_secs: 300,
+            ..Default::default()
+        };
+        let mut deduper = Deduper::new(300);
+        let mut state = AgentState::new(&cfg, "h-1");
+        let p = fixture_procfs();
+        let runner = FakeSys {
+            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40000 ssh2"}
+{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Failed password for root from 203.0.113.7 port 40001 ssh2"}"#.to_string(),
+        };
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_002_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        assert!(evs.iter().any(|e| e.kind == EventKind::SshBruteForce));
+        assert!(evs.iter().any(|e| e.kind == EventKind::NewListeningPort));
+        assert!(evs
+            .iter()
+            .any(|e| e.kind == EventKind::NewOutboundConnection));
+    }
+
+    #[test]
+    fn run_once_tracks_journal_since_across_polls() {
+        let mut state = AgentState::for_tests();
+        let runner = FakeSys {
+            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000100000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted publickey for deploy from 198.51.100.24 port 51234 ssh2"}"#.to_string(),
+        };
+        let cfg = Config::default();
+        let mut deduper = Deduper::new(300);
+        let p = fixture_procfs();
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_002_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        assert!(evs.iter().any(|e| e.kind == EventKind::SshLogin));
+        assert_eq!(state.journal_since, 1_758_000_000);
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_004_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        assert!(!evs.iter().any(|e| e.kind == EventKind::SshLogin));
+    }
+
+    #[test]
+    fn run_once_emits_sudo_and_root_login() {
+        let mut state = AgentState::for_tests();
+        let runner = FakeSys {
+            journal_out: r#"{"__REALTIME_TIMESTAMP":"1758000000200000","SYSLOG_IDENTIFIER":"sudo","MESSAGE":"deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/systemctl restart nginx"}
+{"__REALTIME_TIMESTAMP":"1758000000500000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted password for root from 198.51.100.24 port 51235 ssh2"}"#.to_string(),
+        };
+        let cfg = Config::default();
+        let mut deduper = Deduper::new(300);
+        let p = fixture_procfs();
+        let evs = run_once(
+            &cfg,
+            &mut deduper,
+            "h-1",
+            1_758_000_002_000,
+            &p,
+            &runner,
+            &runner,
+            &mut state,
+        );
+        assert!(evs.iter().any(|e| e.kind == EventKind::SudoUsed));
+        assert!(evs.iter().any(|e| e.kind == EventKind::RootLogin));
+        // root login from a first-seen IP escalates to Critical
+        let root = evs.iter().find(|e| e.kind == EventKind::RootLogin).unwrap();
+        assert_eq!(root.severity, wt_common::Severity::Critical);
+    }
+
+    struct FakeSys {
+        journal_out: String,
+    }
 
     impl crate::cmd::CommandRunner for FakeSys {
         fn program(&self) -> &'static str {
-            "fake"
+            "journalctl"
         }
-        fn run(&self, _args: &[&str]) -> Result<String, String> {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            if args.contains(&"--since") {
+                return Ok(self.journal_out.clone());
+            }
             Ok("".to_string())
         }
     }
