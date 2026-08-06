@@ -130,8 +130,28 @@ mod tests {
         // second scan: same episode, no new event
         let evs = watchdog_scan(&state, now + grace + 2000).await.unwrap();
         assert!(evs.is_empty());
-        // heartbeat arrives → episode resets → next miss re-emits
+        // heartbeat arrives → episode resets → next miss re-emits.
+        // last_seen is server now_ms with millisecond granularity; if the
+        // recovery upsert lands in the same ms as the first upsert, last_seen
+        // is unchanged and the re-emit is suppressed. Sleep to force distinct ms.
+        let (_, ls_before, _): (String, i64, i64) = sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT host_id, last_seen, queue_len FROM hosts WHERE host_id = 'h-1'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
         upsert_host(&state.pool, &hb).await.unwrap();
+        let (_, ls_after, _): (String, i64, i64) = sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT host_id, last_seen, queue_len FROM hosts WHERE host_id = 'h-1'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert!(
+            ls_after > ls_before,
+            "recovery upsert must advance last_seen"
+        );
         let now2 = crate::ingest::now_ms();
         let evs = watchdog_scan(&state, now2 + grace + 1000).await.unwrap();
         assert_eq!(evs.len(), 1, "new episode after recovery re-emits");
