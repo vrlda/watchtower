@@ -123,6 +123,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ui_has_incidents_nav() {
+        let app = build_app(AppState::for_tests().await).await;
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("data-view=\"incidents\""));
+    }
+
+    #[tokio::test]
     async fn ping_returns_ok() {
         let app = build_app(AppState::for_tests().await).await;
         let resp = app
