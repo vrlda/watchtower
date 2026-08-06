@@ -17,6 +17,7 @@ struct ServerConfigToml {
     #[serde(default)]
     probes: Vec<ProbeConfig>,
     scan_interval_secs: Option<i64>,
+    notify_min_interval_secs: Option<i64>,
     #[serde(default)]
     rule: Vec<crate::correlation::Rule>,
     rules: Option<Vec<crate::correlation::Rule>>,
@@ -39,6 +40,9 @@ impl From<ServerConfigToml> for ServerConfig {
             auth_token: t.auth_token.unwrap_or(defaults.auth_token),
             probes,
             scan_interval_secs: t.scan_interval_secs.unwrap_or(defaults.scan_interval_secs),
+            notify_min_interval_secs: t
+                .notify_min_interval_secs
+                .unwrap_or(defaults.notify_min_interval_secs),
             rules,
             notify: t.notify.unwrap_or(defaults.notify),
             ui_base_url: t.ui_base_url.unwrap_or(defaults.ui_base_url),
@@ -69,6 +73,10 @@ pub struct ServerConfig {
     /// Correlation scan interval (seconds).
     #[serde(default = "default_scan_interval")]
     pub scan_interval_secs: i64,
+    /// Minimum seconds between notifications per incident (absorb re-notify
+    /// throttle).
+    #[serde(default = "default_notify_min_interval")]
+    pub notify_min_interval_secs: i64,
     /// Correlation rules; entries override built-in defaults by id.
     #[serde(default)]
     pub rules: Vec<crate::correlation::Rule>,
@@ -98,6 +106,10 @@ fn default_scan_interval() -> i64 {
     10
 }
 
+fn default_notify_min_interval() -> i64 {
+    60
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -106,6 +118,7 @@ impl Default for ServerConfig {
             auth_token: String::new(),
             probes: Vec::new(),
             scan_interval_secs: default_scan_interval(),
+            notify_min_interval_secs: default_notify_min_interval(),
             rules: Vec::new(),
             notify: crate::notify::NotifyConfig::default(),
             ui_base_url: "http://127.0.0.1:8787".into(),

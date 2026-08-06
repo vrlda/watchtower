@@ -327,31 +327,35 @@ pub fn resolve_chat_id_from_updates(updates: &[serde_json::Value]) -> Option<i64
     })
 }
 
-/// Direct sendMessage to a specific chat.
+/// Direct sendMessage to a specific chat. The blocking ureq call runs in
+/// spawn_blocking (async callers must not stall a worker).
 pub async fn send_to_chat(
     api_base: &str,
     token: &str,
     chat_id: i64,
     text: &str,
 ) -> Result<(), String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
-    let url = format!(
-        "{}/bot{}/sendMessage",
-        api_base.trim_end_matches('/'),
-        token
-    );
-    let resp = agent
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .send_string(&serde_json::json!({ "chat_id": chat_id, "text": text }).to_string())
-        .map_err(|e| e.to_string())?;
-    if (200..300).contains(&resp.status()) {
-        Ok(())
-    } else {
-        Err(format!("http {}", resp.status()))
-    }
+    let base = api_base.to_string();
+    let token = token.to_string();
+    let text = text.to_string();
+    tokio::task::spawn_blocking(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(10))
+            .build();
+        let url = format!("{}/bot{}/sendMessage", base.trim_end_matches('/'), token);
+        let resp = agent
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .send_string(&serde_json::json!({ "chat_id": chat_id, "text": text }).to_string())
+            .map_err(|e| e.to_string())?;
+        if (200..300).contains(&resp.status()) {
+            Ok(())
+        } else {
+            Err(format!("http {}", resp.status()))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Module-level client built once from the configured token. Token changes

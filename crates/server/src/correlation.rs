@@ -434,6 +434,33 @@ pub async fn recently_resolved(
     })
 }
 
+/// Per-incident minimum interval between notifications (absorb re-notify
+/// throttle). An incident that absorbs new events re-notifies at most once
+/// per window — the M4-era "full payload per absorb" debt.
+pub struct NotifyThrottle {
+    window_ms: i64,
+    last: std::collections::HashMap<String, i64>,
+}
+
+impl NotifyThrottle {
+    pub fn new(window_secs: i64) -> Self {
+        NotifyThrottle {
+            window_ms: window_secs.max(0) * 1000,
+            last: Default::default(),
+        }
+    }
+
+    pub fn allow(&mut self, incident_id: &str, ts: i64) -> bool {
+        let last = self.last.entry(incident_id.to_string()).or_insert(i64::MIN);
+        if ts.saturating_sub(*last) >= self.window_ms {
+            *last = ts;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Spawn the correlation loop: scan every interval, notify on changes.
 pub fn spawn_runner(state: crate::app::AppState) {
     tokio::spawn(crate::supervise::spawn_supervised(
@@ -444,6 +471,7 @@ pub fn spawn_runner(state: crate::app::AppState) {
 
 async fn scan_loop(state: crate::app::AppState) {
     let interval = state.cfg.scan_interval_secs.max(5); // clamp: never scan faster than every 5s
+    let mut throttle = NotifyThrottle::new(state.cfg.notify_min_interval_secs);
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval as u64));
     ticker.tick().await; // skip immediate
     loop {
@@ -455,6 +483,9 @@ async fn scan_loop(state: crate::app::AppState) {
                     continue;
                 }
                 for inc in &changed {
+                    if !throttle.allow(&inc.id, now) {
+                        continue;
+                    }
                     eprintln!("incident {}: {} [{}]", inc.id, inc.headline, inc.severity);
                     let json = crate::api_incidents::incident_json(inc);
                     if let Err(e) = state.notify_tx.try_send(json) {
@@ -1098,6 +1129,16 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
         let req = handle.join().unwrap();
         assert!(req.contains("watchtower.incident"));
         assert!(req.contains("myapp.service became unhealthy"));
+    }
+
+    #[test]
+    fn notify_throttle_limits_absorbs() {
+        let mut t = NotifyThrottle::new(300);
+        assert!(t.allow("inc-1", 1_000), "first notify allowed");
+        assert!(!t.allow("inc-1", 1_001), "second within window suppressed");
+        assert!(!t.allow("inc-1", 300_000), "within the window suppressed");
+        assert!(t.allow("inc-1", 301_001), "past the window allowed");
+        assert!(t.allow("inc-2", 301_001), "different incident unaffected");
     }
 
     #[test]
