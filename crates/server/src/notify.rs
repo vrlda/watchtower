@@ -116,13 +116,19 @@ pub fn slack_payload(incident_json: &serde_json::Value, ui_base_url: &str) -> St
 pub struct TelegramClient {
     pub token: String,
     pub chat_id: std::sync::Mutex<Option<i64>>,
+    pub password: Option<String>,
 }
 
 impl TelegramClient {
     pub fn new(token: String, chat: Option<i64>) -> Self {
+        TelegramClient::with_password(token, chat, None)
+    }
+
+    pub fn with_password(token: String, chat: Option<i64>, password: Option<String>) -> Self {
         TelegramClient {
             token,
             chat_id: std::sync::Mutex::new(chat),
+            password,
         }
     }
 }
@@ -180,14 +186,20 @@ pub fn telegram_send(client: &TelegramClient, api_base: &str, text: &str) -> Res
     };
     let chat = match known {
         Some(c) => c,
-        None => match resolve_chat_id(api_base, &client.token)? {
-            Some(c) => {
-                eprintln!("telegram: resolved chat id {}", c);
-                *client.chat_id.lock().unwrap() = Some(c);
-                c
+        None => {
+            if client.password.is_some() {
+                // password-protected: only the registrar may register chats
+                return Ok(false);
             }
-            None => return Ok(false),
-        },
+            match resolve_chat_id(api_base, &client.token)? {
+                Some(c) => {
+                    eprintln!("telegram: resolved chat id {}", c);
+                    *client.chat_id.lock().unwrap() = Some(c);
+                    c
+                }
+                None => return Ok(false),
+            }
+        }
     };
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
@@ -275,12 +287,35 @@ fn resolve_updates_sync(api_base: &str, token: &str) -> Result<Vec<serde_json::V
     Ok(body["result"].as_array().cloned().unwrap_or_default())
 }
 
-/// getUpdates result array.
+/// getUpdates result array. `offset` = first update to fetch (last processed
+/// update_id + 1), so processed updates are confirmed and never re-fetched.
+/// The blocking ureq call runs in spawn_blocking (async callers must not
+/// stall a worker).
 pub async fn resolve_updates(
     api_base: &str,
     token: &str,
+    offset: Option<i64>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    resolve_updates_sync(api_base, token)
+    let base = api_base.to_string();
+    let token = token.to_string();
+    tokio::task::spawn_blocking(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(10))
+            .build();
+        let mut url = format!("{}/bot{}/getUpdates", base.trim_end_matches('/'), token);
+        if let Some(o) = offset {
+            url.push_str(&format!("?offset={}", o));
+        }
+        let body: serde_json::Value = agent
+            .get(&url)
+            .call()
+            .map_err(|e| e.to_string())?
+            .into_json()
+            .map_err(|e| e.to_string())?;
+        Ok(body["result"].as_array().cloned().unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// First chat id found across updates (message or my_chat_member).
@@ -330,9 +365,12 @@ static TELEGRAM_MISCONFIG_LOGGED: std::sync::atomic::AtomicBool =
 pub fn telegram_client(
     token: Option<&str>,
     pinned_chat: Option<i64>,
+    password: Option<&str>,
 ) -> Option<&'static TelegramClient> {
     let token = token?;
-    Some(TELEGRAM.get_or_init(|| TelegramClient::new(token.to_string(), pinned_chat)))
+    Some(TELEGRAM.get_or_init(|| {
+        TelegramClient::with_password(token.to_string(), pinned_chat, password.map(String::from))
+    }))
 }
 
 /// Timestamp → "YYYY-MM-DD HH:MM:SS" (UTC). No chrono — civil-from-days.
@@ -394,7 +432,11 @@ pub async fn notify_incident(
                     continue;
                 }
                 Some(token) => {
-                    if let Some(client) = telegram_client(Some(token), cfg.telegram_chat_id) {
+                    if let Some(client) = telegram_client(
+                        Some(token),
+                        cfg.telegram_chat_id,
+                        cfg.telegram_password.as_deref(),
+                    ) {
                         let text = telegram_payload(incident_json, ui_base_url);
                         let ok = tokio::task::spawn_blocking(move || {
                             telegram_send(client, TELEGRAM_API, &text)
@@ -516,66 +558,83 @@ pub fn spawn_retry_loop(state: crate::app::AppState) {
 /// no-offset getUpdates, updates re-deliver; without dedup every poll would
 /// re-prompt the operator.
 pub fn spawn_telegram_registrar(state: crate::app::AppState) {
+    if state.notify.telegram_chat_id.is_some() {
+        return; // pinned chat — no handshake needed
+    }
     let Some(token) = state.notify.telegram_token.clone() else {
         return;
     };
     let Some(password) = state.notify.telegram_password.clone() else {
         return; // legacy first-chat discovery — no handshake needed
     };
-    tokio::spawn(async move {
-        let mut seen: std::collections::HashSet<i64> = Default::default();
-        let mut awaiting: std::collections::HashMap<i64, bool> = Default::default();
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+    tokio::spawn(crate::supervise::spawn_supervised(
+        "telegram-registrar",
+        move || registrar_loop(token.clone(), password.clone()),
+    ));
+}
+
+async fn registrar_loop(token: String, password: String) {
+    let mut seen: std::collections::HashSet<i64> = Default::default();
+    let mut awaiting: std::collections::HashMap<i64, bool> = Default::default();
+    let mut max_seen: i64 = 0;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+    ticker.tick().await;
+    loop {
         ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let Ok(updates) = resolve_updates(TELEGRAM_API, &token).await else {
+        let offset = if max_seen > 0 {
+            Some(max_seen + 1)
+        } else {
+            None
+        };
+        let Ok(updates) = resolve_updates(TELEGRAM_API, &token, offset).await else {
+            continue;
+        };
+        for u in &updates {
+            let Some(update_id) = u["update_id"].as_i64() else {
                 continue;
             };
-            for u in &updates {
-                let Some(update_id) = u["update_id"].as_i64() else {
-                    continue;
-                };
-                if !seen.insert(update_id) {
-                    continue;
+            if update_id > max_seen {
+                max_seen = update_id;
+            }
+            if !seen.insert(update_id) {
+                continue;
+            }
+            let Some((chat, text)) = update_chat_and_text(u) else {
+                continue;
+            };
+            let is_awaiting = *awaiting.get(&chat).unwrap_or(&false);
+            match registrar_step(Some(&password), &chat.to_string(), &text, is_awaiting) {
+                RegStep::AskPassword => {
+                    awaiting.insert(chat, true);
+                    let _ = send_to_chat(
+                        TELEGRAM_API,
+                        &token,
+                        chat,
+                        "Send the password to register this chat.",
+                    )
+                    .await;
                 }
-                let Some((chat, text)) = update_chat_and_text(u) else {
-                    continue;
-                };
-                let is_awaiting = *awaiting.get(&chat).unwrap_or(&false);
-                match registrar_step(Some(&password), &chat.to_string(), &text, is_awaiting) {
-                    RegStep::AskPassword => {
-                        awaiting.insert(chat, true);
-                        let _ = send_to_chat(
-                            TELEGRAM_API,
-                            &token,
-                            chat,
-                            "Send the password to register this chat.",
-                        )
-                        .await;
+                RegStep::Register(_) => {
+                    awaiting.remove(&chat);
+                    if let Some(client) = telegram_client(Some(&token), None, Some(&password)) {
+                        *client.chat_id.lock().unwrap() = Some(chat);
                     }
-                    RegStep::Register(_) => {
-                        awaiting.remove(&chat);
-                        if let Some(client) = telegram_client(Some(&token), None) {
-                            *client.chat_id.lock().unwrap() = Some(chat);
-                        }
-                        let _ = send_to_chat(
-                            TELEGRAM_API,
-                            &token,
-                            chat,
-                            "Chat registered — notifications will be sent here.",
-                        )
-                        .await;
-                        eprintln!("telegram: chat {} registered", chat);
-                    }
-                    RegStep::Reject => {
-                        let _ = send_to_chat(TELEGRAM_API, &token, chat, "Wrong password.").await;
-                    }
-                    _ => {}
+                    let _ = send_to_chat(
+                        TELEGRAM_API,
+                        &token,
+                        chat,
+                        "Chat registered — notifications will be sent here.",
+                    )
+                    .await;
+                    eprintln!("telegram: chat {} registered", chat);
                 }
+                RegStep::Reject => {
+                    let _ = send_to_chat(TELEGRAM_API, &token, chat, "Wrong password.").await;
+                }
+                _ => {}
             }
         }
-    });
+    }
 }
 
 async fn retry_loop(state: crate::app::AppState) {
@@ -975,6 +1034,41 @@ mod tests {
             Some(12345),
             "chat resolved and cached"
         );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn telegram_password_blocks_legacy_auto_resolve() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            // if getUpdates is ever requested this mock would answer — the
+            // assertion below proves it was never reached. Bounded accept
+            // loop: if no connection arrives, the thread exits instead of
+            // blocking join() forever.
+            for _ in 0..100 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let body = r#"{"ok":true,"result":[{"update_id":1,"message":{"chat":{"id":1},"from":{"is_bot":false},"text":"/start"}}]}"#;
+                        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                        let _ = stream.write_all(resp.as_bytes());
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+        });
+        let base = format!("http://{}", addr);
+        let client = TelegramClient::with_password("tok".into(), None, Some("hunter2".into()));
+        let ok = telegram_send(&client, &base, "hello").unwrap();
+        assert!(
+            !ok,
+            "password set + no chat → must NOT resolve, just report unregistered"
+        );
+        assert_eq!(*client.chat_id.lock().unwrap(), None);
         handle.join().unwrap();
     }
 
