@@ -1,21 +1,52 @@
 #!/usr/bin/env bash
 # Watchtower agent installer.
-# Usage:
-#   SERVER_URL=https://control.example.com TOKEN=secret sh install.sh
-#   WATCHTOWER_BINARY=/path/to/watchtower-agent sh install.sh   # local build
-#   INSTALL_URL=<release tarball URL> INSTALL_SHA256=<checksum> sh install.sh
+#
+# Invocation styles:
+#   one command (fetches the latest release, verifies the checksum, installs):
+#     curl -fsSL https://raw.githubusercontent.com/vrlda/watchtower/main/scripts/install.sh \
+#       | sudo bash -s -- --server-url http://control.example.com --token secret
+#   flags:
+#     sudo bash scripts/install.sh --server-url http://control.example.com --token secret
+#   env vars (fallback for the flags):
+#     SERVER_URL=http://control.example.com TOKEN=secret sh install.sh
+#   local build:
+#     WATCHTOWER_BINARY=/path/to/watchtower-agent sh install.sh
+#   pinned release:
+#     INSTALL_URL=<release tarball URL> INSTALL_SHA256=<checksum> sh install.sh
 set -euo pipefail
 
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 BINARY_SRC="${WATCHTOWER_BINARY:-}"
+INSTALL_URL="${INSTALL_URL:-}"
+INSTALL_SHA256="${INSTALL_SHA256:-}"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/watchtower"
 SPOOL_DIR="/var/lib/watchtower/spool"
 UNIT_NAME="watchtower-agent.service"
 
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --server-url)
+      [ "$#" -ge 2 ] || { echo "--server-url requires a value" >&2; exit 1; }
+      SERVER_URL="$2"
+      shift 2
+      ;;
+    --token)
+      [ "$#" -ge 2 ] || { echo "--token requires a value" >&2; exit 1; }
+      TOKEN="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
 if [ -z "$SERVER_URL" ] || [ -z "$TOKEN" ]; then
-  echo "usage: SERVER_URL=<url> TOKEN=<token> sh install.sh" >&2
+  echo "usage: sudo bash install.sh --server-url <url> --token <token>" >&2
+  echo "   or: SERVER_URL=<url> TOKEN=<token> sh install.sh" >&2
   exit 1
 fi
 
@@ -24,9 +55,53 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Portable checksum verify: sha256sum on Linux, shasum on macOS.
+verify_sha256() {
+  local file="$1" expected="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "$expected  $file" | sha256sum -c - >/dev/null
+  else
+    echo "$expected  $file" | shasum -a 256 -c - >/dev/null
+  fi
+}
+
+# No explicit install source: resolve the latest release from the GitHub API.
+# The asset name comes from the API, not constructed from the tag: release.sh
+# names the tarball after the crate version (e.g. 0.1.0), which differs from
+# the git tag (e.g. v0.2.0).
+if [ -z "$INSTALL_URL" ] && [ -z "$INSTALL_SHA256" ] && [ -z "$BINARY_SRC" ]; then
+  echo "==> resolving latest release"
+  LATEST_JSON="$(curl -fsSL https://api.github.com/repos/vrlda/watchtower/releases/latest)" || {
+    echo "failed to query GitHub for the latest release" >&2
+    exit 1
+  }
+  TAG="$(printf '%s' "$LATEST_JSON" | grep -o '"tag_name"[^,]*' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)" || true
+  [ -n "$TAG" ] || { echo "could not parse the latest release tag" >&2; exit 1; }
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    x86_64|amd64) TARGET="x86_64-unknown-linux-gnu" ;;
+    aarch64|arm64)
+      echo "aarch64 builds are not published yet (CI builds x86_64) — build from source instead" >&2
+      exit 1
+      ;;
+    *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
+  esac
+  BASE="https://github.com/vrlda/watchtower/releases/download/$TAG"
+  ASSET_URL="$(printf '%s' "$LATEST_JSON" | grep -o '"browser_download_url": *"[^"]*'"$TARGET"'.tar.gz"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)" || true
+  [ -n "$ASSET_URL" ] || { echo "could not find a $TARGET asset in release $TAG" >&2; exit 1; }
+  ASSET="$(basename "$ASSET_URL")"
+  INSTALL_URL="$BASE/$ASSET"
+  SHA_SUMS="$(curl -fsSL "$BASE/SHA256SUMS")" || {
+    echo "could not fetch SHA256SUMS for $TAG — re-tag or use INSTALL_URL+INSTALL_SHA256" >&2
+    exit 1
+  }
+  INSTALL_SHA256="$(printf '%s' "$SHA_SUMS" | awk -v a="$ASSET" '$2 == a { print $1 }' | head -n 1)" || true
+  [ -n "$INSTALL_SHA256" ] || { echo "no checksum for $ASSET in SHA256SUMS" >&2; exit 1; }
+fi
+
 echo "==> installing binary"
-if [ -n "${INSTALL_URL:-}" ]; then
-  if [ -z "${INSTALL_SHA256:-}" ]; then
+if [ -n "$INSTALL_URL" ]; then
+  if [ -z "$INSTALL_SHA256" ]; then
     echo "INSTALL_SHA256 is required when using INSTALL_URL" >&2
     exit 1
   fi
@@ -34,7 +109,7 @@ if [ -n "${INSTALL_URL:-}" ]; then
   trap 'rm -f "$TMP"' EXIT
   echo "downloading $INSTALL_URL"
   curl -fsSL "$INSTALL_URL" -o "$TMP"
-  echo "$INSTALL_SHA256  $TMP" | shasum -a 256 -c - || { echo "checksum mismatch — aborting" >&2; exit 1; }
+  verify_sha256 "$TMP" "$INSTALL_SHA256" || { echo "checksum mismatch — aborting" >&2; exit 1; }
   tar -xzf "$TMP" -C "$INSTALL_DIR"
   chmod 0755 "$INSTALL_DIR/watchtower-agent" "$INSTALL_DIR/watchtower-server"
 elif [ -n "$BINARY_SRC" ]; then

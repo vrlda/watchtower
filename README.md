@@ -34,13 +34,38 @@ cargo build --release
 ./target/release/watchtower-server --config /etc/watchtower/server.toml
 ```
 
-Linux install (binary, systemd unit, config, self-registration):
+## Install (Linux)
+
+One command (fetches the latest release, verifies the checksum, installs):
 
 ```bash
-INSTALL_URL=https://.../watchtower-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
-  INSTALL_SHA256=<from SHA256SUMS> \
+curl -fsSL https://raw.githubusercontent.com/vrlda/watchtower/main/scripts/install.sh \
+  | sudo bash -s -- --server-url http://control.example.com --token secret
+```
+
+The `--server-url`/`--token` flags also work on a local script run (`SERVER_URL`/`TOKEN`
+env vars are the flag fallback):
+
+```bash
+sudo bash scripts/install.sh --server-url http://control.example.com --token secret
+```
+
+Pin a version (the tarball URL pattern is `<release>/download/<tag>/`; tarballs are
+named after the crate version, not the tag):
+
+```bash
+INSTALL_URL=https://github.com/vrlda/watchtower/releases/download/v0.1.0/watchtower-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+  INSTALL_SHA256=<hash from SHA256SUMS> \
   SERVER_URL=http://control.example.com TOKEN=secret \
-  sudo sh scripts/install.sh
+  sudo bash scripts/install.sh
+```
+
+From a local build:
+
+```bash
+WATCHTOWER_BINARY=target/release/watchtower-agent \
+  SERVER_URL=http://control.example.com TOKEN=secret \
+  sudo bash scripts/install.sh
 ```
 
 The agent runs as a dedicated `watchtower` user, `NoNewPrivileges=yes`, no capabilities.
