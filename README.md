@@ -81,6 +81,24 @@ Multiple servers: run one `watchtower-server` per site, each with the same
 bot token (+ optional chat id) — incidents from every site land in the one
 Telegram chat.
 
+### Config reference
+
+Agent (`agent.toml`) — full-batch keys:
+
+- `state_file` — JSONL state (seen IPs, journal cursor, baselines) restored across restarts; empty = no persistence
+- `watch_authorized_keys` — FIM-watch `/root/.ssh/authorized_keys` and `/home/*/.ssh/authorized_keys`
+- `access_log_paths` — access logs parsed for request-volume / 5xx spikes
+- `request_rate_threshold` — total requests per window that fires `RequestRateSpike`
+- `request_rate_window_secs` — request-rate window length
+- `process_scan_interval_secs` — `/proc` snapshot cadence (suspicious/unexpected-exec heuristics)
+- `scan_threshold` — distinct new remote connections within the window that fire `PortScanSpike`
+- `scan_window_secs` — port-scan window length
+
+Server (`server.toml`):
+
+- `db_url` — also accepts `postgres://` (Postgres via sqlx; sqlite is the default; CI runs a Postgres job)
+- `notify_min_interval_secs` — min interval between re-notifications of the same incident
+
 ## Install (Linux)
 
     # release build with checksum:

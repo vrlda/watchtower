@@ -54,6 +54,9 @@ Expose the listener only where the UI + agents can reach it (default localhost).
 
 ## Known limitations (post-1.0 backlog)
 
-See docs/roadmap.md — access-log parsing, docker API socket, persistent
-seen-IP/cert state, multi-host correlation, per-host tokens, Postgres
-migration, telemetry bandwidth budget, signed binaries (checksummed today).
+See docs/roadmap.md — docker over the API socket, telemetry bandwidth budget,
+signed binaries (checksummed today; signing infra is external), Kubernetes,
+Windows. Multi-host correlation shipped but live multi-site testing at scale
+is not yet exercised. Access-log parsing, persistent seen-IP/cert state,
+multi-host correlation, per-host tokens, and Postgres all shipped in the
+2026-08-07 full batch (see docs/specs/audit.md).
