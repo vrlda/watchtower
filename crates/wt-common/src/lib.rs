@@ -183,8 +183,13 @@ pub struct Config {
     pub process_scan_interval_secs: i64,
     /// Agent state file (seen-IPs, journal cursor, baselines) — persisted
     /// across restarts. Empty = no persistence.
-    #[serde(default)]
+    #[serde(default = "default_state_file")]
     pub state_file: String,
+}
+
+/// Default agent state path (matches the install layout).
+fn default_state_file() -> String {
+    "/var/lib/watchtower/agent-state.json".into()
 }
 
 impl Default for Config {
@@ -291,6 +296,19 @@ mod tests {
         assert_eq!(cfg.server_url, "https://ctl.example.com");
         assert_eq!(cfg.poll_interval_secs, 15);
         assert_eq!(cfg.disk_crit_pct, 90.0);
+    }
+
+    #[test]
+    fn state_file_defaults_to_install_path() {
+        let cfg: Config =
+            toml::from_str("server_url = \"https://ctl.example.com\"\ntoken = \"abc\"\n").unwrap();
+        assert_eq!(cfg.state_file, "/var/lib/watchtower/agent-state.json");
+        let cfg: Config = toml::from_str(
+            "server_url = \"https://ctl.example.com\"\ntoken = \"abc\"\n\
+             state_file = \"/tmp/agent-state.json\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.state_file, "/tmp/agent-state.json");
     }
 
     #[test]

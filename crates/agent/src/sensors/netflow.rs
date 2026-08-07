@@ -4,10 +4,6 @@ use crate::engine::SpikeDetector;
 use crate::procfs::{ProcFs, TcpEntry};
 use wt_common::{AgentEvent, EventKind, Evidence, Severity};
 
-/// UDP source-port sockets above this are ephemeral (dynamic DNS/NTP
-/// clients etc.) — not listeners worth flagging.
-const UDP_EPHEMERAL_MIN: u16 = 49152;
-
 /// Snapshot state for network monitoring: previous listen/remote sets and a
 /// rolling detector on the established-connection count.
 pub struct NetState {
@@ -90,13 +86,14 @@ impl NetState {
             });
         }
         let mut udp_now = HashSet::new();
+        let min = p.udp_ephemeral_min();
         for (ip, port) in p
             .udp_entries()
             .unwrap_or_default()
             .into_iter()
             .chain(p.udp6_entries().unwrap_or_default())
         {
-            if port >= UDP_EPHEMERAL_MIN {
+            if port >= min {
                 continue; // ephemeral source socket — not a real listener
             }
             let key = format!("udp:{}:{}", ip, port);
@@ -273,10 +270,12 @@ mod tests {
         // real listeners still fire
         assert!(evs.iter().any(|e| e.key == "port:udp:0.0.0.0:5353"));
         assert!(evs.iter().any(|e| e.key == "port:udp:127.0.0.1:53"));
-        // the fixture's ephemeral source socket (50000 >= 49152) must not
+        // the fixture's ephemeral source sockets (40000, 50000 >= 32768)
+        // must not fire
         assert!(
-            evs.iter().all(|e| !e.key.contains(":50000")),
-            "ephemeral UDP port must not fire: {:?}",
+            evs.iter()
+                .all(|e| !e.key.contains(":40000") && !e.key.contains(":50000")),
+            "ephemeral UDP ports must not fire: {:?}",
             evs.iter().map(|e| e.key.as_str()).collect::<Vec<_>>()
         );
     }

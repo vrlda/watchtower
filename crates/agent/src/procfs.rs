@@ -235,6 +235,17 @@ impl ProcFs {
         Ok(text.trim().to_string())
     }
 
+    /// Linux ephemeral port range start from /proc/sys/net/ipv4/ip_local_port_range
+    /// (32768 on stock kernels). Sockets bound at/above this are source/backend
+    /// sockets, not listeners worth flagging. Falls back to 32768.
+    pub fn udp_ephemeral_min(&self) -> u16 {
+        self.read("sys/net/ipv4/ip_local_port_range")
+            .ok()
+            .and_then(|s| s.split_whitespace().next().map(|v| v.to_string()))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32768)
+    }
+
     pub fn netdev_errors(&self) -> Result<HashMap<String, NetDevErrors>, String> {
         let text = self.read("net/dev")?;
         let mut out = HashMap::new();
@@ -381,6 +392,18 @@ mod tests {
         let p = ProcFs::new(test_base());
         let id = p.boot_id().unwrap();
         assert!(id.contains('-'), "uuid-shaped: {}", id);
+    }
+
+    #[test]
+    fn ephemeral_min_reads_kernel_range() {
+        let p = ProcFs::new(test_base());
+        assert_eq!(p.udp_ephemeral_min(), 32768);
+    }
+
+    #[test]
+    fn ephemeral_min_falls_back_when_range_unreadable() {
+        let p = ProcFs::new(PathBuf::from("/nonexistent"));
+        assert_eq!(p.udp_ephemeral_min(), 32768);
     }
 
     #[test]
