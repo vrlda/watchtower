@@ -1,6 +1,6 @@
 # Watchtower
 
-[![CI](https://github.com/vrlda/umc/actions/workflows/ci.yml/badge.svg)](https://github.com/vrlda/umc/actions/workflows/ci.yml)
+[![CI](https://github.com/vrlda/watchtower/actions/workflows/ci.yml/badge.svg)](https://github.com/vrlda/watchtower/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Production server autopilot: one agent that watches the health and security of your server.
