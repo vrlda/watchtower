@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # 1.0 verification on a Linux box. Runs every integration surface once.
+#
+# Invoke as root with an intact PATH and bash (sudo sh strips PATH → cargo
+# not found, and dash has no pipefail):
+#   sudo env "PATH=$PATH" bash scripts/verify-linux.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

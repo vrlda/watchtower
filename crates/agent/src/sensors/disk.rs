@@ -2,6 +2,7 @@
 //! DiskHigh/InodeHigh kinds existed but nothing emitted them.
 
 use crate::procfs::ProcFs;
+use std::collections::HashMap;
 use wt_common::{AgentEvent, Config, EventKind, Evidence, Severity};
 
 /// Used percentage of a capacity.
@@ -51,9 +52,25 @@ fn stat_mount(mount_point: &str) -> Option<(u64, u64, u64, u64, bool)> {
     ))
 }
 
+/// Pure: update the RO baseline for `mount` and report whether a FsReadOnly
+/// event should fire. First sight seeds the baseline (no event — a boot-time
+/// ro mount like a systemd bind-mount is normal); a rw→ro flip fires;
+/// ro→ro is quiet. The baseline always reflects the last seen flag, so a
+/// ro→rw→ro sequence re-fires.
+pub fn ro_transition(baseline: &mut HashMap<String, bool>, mount: &str, read_only: bool) -> bool {
+    let before = baseline.insert(mount.to_string(), read_only);
+    read_only && before == Some(false)
+}
+
 /// Emit disk/inode events for all mounts at `ts`. Fail-open: unreadable
 /// mounts or a missing /proc are skipped.
-pub fn disk_events(p: &ProcFs, cfg: &Config, ts: i64, host_id: &str) -> Vec<AgentEvent> {
+pub fn disk_events(
+    p: &ProcFs,
+    cfg: &Config,
+    ts: i64,
+    host_id: &str,
+    ro_baseline: &mut HashMap<String, bool>,
+) -> Vec<AgentEvent> {
     let mut evs = Vec::new();
     let Ok(mounts) = p.mounts() else { return evs };
     for m in &mounts {
@@ -98,7 +115,7 @@ pub fn disk_events(p: &ProcFs, cfg: &Config, ts: i64, host_id: &str) -> Vec<Agen
                 }],
             });
         }
-        if read_only {
+        if ro_transition(ro_baseline, &m.mount_point, read_only) {
             evs.push(AgentEvent {
                 id: format!("fsro-{}-{}", m.mount_point, ts),
                 ts,
@@ -143,5 +160,23 @@ mod tests {
         let cfg = Config::default(); // inode crit 90
         assert_eq!(inode_severity(50.0, &cfg), Severity::Info);
         assert_eq!(inode_severity(95.0, &cfg), Severity::Critical);
+    }
+
+    #[test]
+    fn ro_transition_first_sight_seeds_no_event() {
+        let mut b = HashMap::new();
+        assert!(!ro_transition(&mut b, "/run/systemd", true));
+        assert_eq!(b.get("/run/systemd"), Some(&true));
+    }
+
+    #[test]
+    fn ro_transition_fires_only_on_rw_to_ro_flip() {
+        let mut b = HashMap::new();
+        assert!(!ro_transition(&mut b, "/data", false)); // seed rw
+        assert!(!ro_transition(&mut b, "/data", false)); // rw→rw quiet
+        assert!(ro_transition(&mut b, "/data", true)); // rw→ro fires
+        assert!(!ro_transition(&mut b, "/data", true)); // ro→ro quiet
+        assert!(!ro_transition(&mut b, "/data", false)); // ro→rw quiet
+        assert!(ro_transition(&mut b, "/data", true)); // rw→ro re-fires
     }
 }

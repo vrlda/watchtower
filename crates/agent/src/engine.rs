@@ -204,6 +204,9 @@ pub struct AgentState {
     pub known_exes: Option<std::collections::HashSet<String>>,
     /// Last process scan time (ms); gates the /proc walk.
     pub last_proc_scan: i64,
+    /// Last seen RO flag per mount point; FsReadOnly fires only on a rw→ro
+    /// transition (a boot-time ro mount is normal, not an event).
+    pub mount_ro_baseline: HashMap<String, bool>,
     /// State persisted across restarts (seen-IPs, journal cursor, baselines).
     pub persisted: crate::state::PersistedState,
 }
@@ -273,6 +276,7 @@ impl AgentState {
             persistence_scan: 0,
             known_exes,
             last_proc_scan: 0,
+            mount_ro_baseline: Default::default(),
             persisted,
         }
     }
@@ -569,7 +573,13 @@ pub fn run_once(
     ));
 
     // disk/inode sensor
-    evs.extend(crate::sensors::disk::disk_events(procfs, cfg, ts, host_id));
+    evs.extend(crate::sensors::disk::disk_events(
+        procfs,
+        cfg,
+        ts,
+        host_id,
+        &mut state.mount_ro_baseline,
+    ));
 
     // access-log sensor (config-gated)
     for path in &cfg.access_log_paths {

@@ -20,6 +20,9 @@ pub fn load(path: &Path) -> PersistedState {
 }
 
 pub fn save(path: &Path, s: &PersistedState) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(json) = serde_json::to_string(s) {
         let _ = std::fs::write(path, json);
     }
@@ -58,5 +61,19 @@ mod tests {
         std::fs::write(&p, "not json").unwrap();
         assert_eq!(load(&p), PersistedState::default());
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn save_creates_missing_parent_dir() {
+        let dir = std::env::temp_dir()
+            .join(format!("wt-absent-{}", std::process::id()))
+            .join("nested");
+        let p = dir.join("wt-state-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        save(&p, &PersistedState::default());
+        assert!(dir.exists(), "parent dir must be created");
+        assert!(p.exists(), "state file must exist after save");
+        assert_eq!(load(&p), PersistedState::default());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
