@@ -124,14 +124,6 @@ sudo env "PATH=$PATH" bash scripts/verify-linux.sh
 
 CI runs all of the above (ubuntu + macos + Postgres + SDK jobs). Plans for every feature batch live in `docs/superpowers/plans/`; the spec and architecture are in `docs/specs/`.
 
-## Known limitations
-
-- No breadcrumbs/session replay/APM/release tracking (exception capture is grouped incidents, not a full Sentry replacement)
-- No Kubernetes or Windows support; single-region control plane (multi-site = one server per site, one shared Telegram channel)
-- Spool capped at 10 MB (drops batches with a loud log beyond that); no fsync on spool append (power loss may lose the last batch)
-- Release binaries are checksummed, not signed; aarch64 cross-builds need a C toolchain (CI builds x86_64)
-- Heuristic detectors (reverse shells, unexpected executables, port scans) are best-effort, not kernel-level guarantees
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
