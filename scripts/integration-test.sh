@@ -82,4 +82,20 @@ echo "==> verifying auth rejection"
 CODE=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/v1/hosts")
 [ "$CODE" = "401" ] && echo "OK unauthorized rejected"
 
+echo "==> verifying exception round-trip"
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"host_id":"it-h","service":"it-svc","environment":"test",
+       "exception":{"type":"ValueError","message":"it boom","level":"error",
+       "frames":[{"file":"it.py","line":1,"function":"main"}]}}' \
+  "http://127.0.0.1:$PORT/v1/errors" >/dev/null
+EXC_KEY=""
+for i in $(seq 1 15); do
+  EXC_KEY=$(curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/incidents" | grep -o 'rule:app_exception:ex:it-svc:[a-f0-9]\{16\}' | head -1) || true
+  [ -n "$EXC_KEY" ] && break
+  sleep 2
+done
+[ -n "$EXC_KEY" ] || { echo "FAILED: no exception incident" >&2; exit 1; }
+echo "OK exception incident: $EXC_KEY"
+
 echo "ALL INTEGRATION CHECKS PASSED"

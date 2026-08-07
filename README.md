@@ -81,6 +81,27 @@ Multiple servers: run one `watchtower-server` per site, each with the same
 bot token (+ optional chat id) — incidents from every site land in the one
 Telegram chat.
 
+### Exception capture
+
+Applications report exceptions to the server; the server fingerprints them
+(type + service + first 3 frames' file:line) and groups each recurring bug
+into one incident — same list, timeline, resolve and notify flow as infra
+events.
+
+Curl reference (any language):
+
+    curl -fsS -X POST http://SERVER:18788/v1/errors \
+      -H "Authorization: Bearer $WATCHTOWER_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"host_id":"web-1","service":"api","environment":"prod",
+           "exception":{"type":"ValueError","message":"bad input","level":"error",
+           "frames":[{"file":"app.py","line":42,"function":"validate"}]}}'
+
+Levels: fatal|error → Critical, warning → Warning, info|debug → Info.
+Grouping: type + service + first 3 frames' file:line. SDKs: Rust
+(crates/watchtower-sdk). Non-goals: breadcrumbs, session replay, APM,
+release tracking.
+
 ### Config reference
 
 Agent (`agent.toml`) — full-batch keys:
