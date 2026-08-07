@@ -2178,6 +2178,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "watchtower-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "watchtower-server"
 version = "0.1.0"
 dependencies = [
