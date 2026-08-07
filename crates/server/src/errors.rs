@@ -1,6 +1,21 @@
-//! In-app exception capture: wire format, fingerprinting, level mapping.
+//! In-app exception capture: wire format, fingerprinting, level mapping,
+//! the POST /v1/errors handler.
 
-use wt_common::Severity;
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::response::Response;
+use wt_common::{AgentEvent, EventKind, Evidence, Severity};
+
+/// Max accepted error-payload size (1 MiB — exceptions carry stack traces,
+/// not payloads).
+const MAX_ERROR_BODY: usize = 1024 * 1024;
+
+/// Per-process sequence for event ids. Two IDENTICAL exceptions in the same
+/// millisecond would otherwise collide on `ex-{host}-{ts}-{short}` and the
+/// INSERT OR IGNORE in store_events would silently drop the second — the
+/// endpoint test relies on one row per POST.
+static EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One stack frame from an SDK.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -73,6 +88,103 @@ pub fn severity_for(level: &str) -> Severity {
         "info" | "debug" => Severity::Info,
         _ => Severity::Critical,
     }
+}
+
+/// Handler for POST /v1/errors. Builds ONE AppException event, stores it;
+/// the correlation scan groups by fingerprint. 400 malformed, 401 bad auth
+/// (middleware), 413 oversized, 200 accept.
+pub async fn handle_errors(
+    State(state): State<crate::app::AppState>,
+    request: Request,
+) -> Result<Response, StatusCode> {
+    let host_override = request
+        .extensions()
+        .get::<crate::auth::ResolvedHost>()
+        .and_then(|h| h.0.clone());
+    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if body_bytes.len() > MAX_ERROR_BODY {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let payload: ErrorEvent =
+        serde_json::from_slice(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut host_id = payload.host_id.clone();
+    if let Some(host) = host_override {
+        host_id = host;
+    }
+    let frame_pairs: Vec<(String, u32)> = payload
+        .exception
+        .frames
+        .iter()
+        .map(|f| (f.file.clone(), f.line))
+        .collect();
+    let key = format!(
+        "ex:{}:{}",
+        payload.service,
+        fingerprint(&payload.service, &payload.exception.kind, &frame_pairs)
+    );
+    let severity = severity_for(&payload.exception.level);
+    let trace = payload
+        .exception
+        .frames
+        .iter()
+        .map(|f| {
+            let loc = format!("{}:{}", f.file, f.line);
+            if f.function.is_empty() {
+                loc
+            } else {
+                format!("{} in {}", loc, f.function)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ts = crate::ingest::now_ms();
+    let short = &key[key.len().saturating_sub(8)..];
+    let ev = AgentEvent {
+        id: format!(
+            "ex-{}-{}-{}-{}",
+            host_id,
+            ts,
+            short,
+            EVENT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
+        ts,
+        host_id,
+        key,
+        kind: EventKind::AppException,
+        severity,
+        summary: if payload.exception.message.is_empty() {
+            payload.exception.kind.clone()
+        } else {
+            payload.exception.message.clone()
+        },
+        evidence: vec![
+            Evidence {
+                ts,
+                source: "exception".into(),
+                detail: trace,
+            },
+            Evidence {
+                ts,
+                source: "exception".into(),
+                detail: format!(
+                    "Type={} Service={} Env={} Level={}",
+                    payload.exception.kind,
+                    payload.service,
+                    payload.environment,
+                    payload.exception.level
+                ),
+            },
+        ],
+    };
+    crate::ingest::store_events(&state.pool, &[ev])
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::empty())
+        .unwrap())
 }
 
 #[cfg(test)]

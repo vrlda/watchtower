@@ -118,6 +118,7 @@ pub async fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/v1/ping", get(ping))
         .route("/v1/telemetry", post(ingest::ingest))
+        .route("/v1/errors", post(crate::errors::handle_errors))
         .route("/v1/heartbeat", post(hosts::heartbeat))
         .route("/v1/hosts", get(hosts::list_hosts))
         .route("/v1/events", get(events::list_events))
@@ -190,5 +191,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn errors_endpoint_stores_and_keys_exception() {
+        let state = AppState::for_tests().await;
+        let pool = state.pool.clone();
+        let app = build_app(state).await;
+        let body = r#"{
+            "host_id": "web-1",
+            "service": "api",
+            "environment": "prod",
+            "exception": {
+                "type": "ValueError",
+                "message": "bad input",
+                "level": "error",
+                "frames": [{"file": "app.py", "line": 42, "function": "validate"}]
+            }
+        }"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/errors")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row: (String, String, String) =
+            sqlx::query_as("SELECT key, severity, kind FROM events WHERE host_id = 'web-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let fp = crate::errors::fingerprint("api", "ValueError", &[("app.py".into(), 42)]);
+        assert_eq!(row.0, format!("ex:api:{}", fp), "key = fingerprint");
+        assert_eq!(row.1, "Critical", "error level → Critical");
+        assert_eq!(row.2, "AppException");
+        // second identical exception → same key (server-side dedup + grouping)
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/errors")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM events WHERE host_id = 'web-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "two distinct event rows (unique ids), same key");
+    }
+
+    #[tokio::test]
+    async fn errors_endpoint_auth_and_bad_body() {
+        let state = AppState::for_tests().await;
+        let app = build_app(state).await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/errors")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"host_id":"h","exception":{"type":"T"}}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "no bearer → 401");
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/v1/errors")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token")
+            .body(Body::from("not json"))
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::BAD_REQUEST,
+            "malformed body → 400"
+        );
     }
 }

@@ -129,6 +129,24 @@ pub fn default_rules() -> Vec<Rule> {
             absorb_only: vec![],
             is_fallback: false,
         },
+        // App exceptions need no supporting evidence; the exception level
+        // propagates to the incident severity (the assemble special-case)
+        // and cooldown is off so a new occurrence always re-opens the
+        // fingerprint's incident.
+        Rule {
+            id: "app_exception".into(),
+            trigger: EventKind::AppException,
+            supporting: vec![],
+            min_supporting: 0,
+            window_secs: 300,
+            cooldown_secs: 0,
+            severity: Severity::Critical,
+            headline: "{summary}".into(),
+            cause: "An application exception was reported.".into(),
+            actions: vec!["Inspect the stack trace in the incident timeline".into()],
+            absorb_only: vec![],
+            is_fallback: false,
+        },
         Rule {
             id: "fallback".into(),
             trigger: EventKind::CpuSpike, // placeholder — is_fallback handles semantics
@@ -173,6 +191,21 @@ pub fn match_rule(
         })
         .collect();
     let trigger = in_window.iter().find(|e| e.kind == rule.trigger)?;
+    // app_exception: ONE match per fingerprint (event key), oldest first —
+    // the caller loops `while let Some` so each fingerprint group becomes
+    // its own incident (a bug is one incident, not N per occurrence).
+    if rule.id == "app_exception" {
+        let group_key = &trigger.key;
+        let events: Vec<AgentEvent> = in_window
+            .iter()
+            .filter(|e| &e.key == group_key)
+            .map(|e| (*e).clone())
+            .collect();
+        return Some(RuleMatch {
+            events,
+            service: None,
+        });
+    }
     let supporting_count = in_window
         .iter()
         .filter(|e| {
@@ -214,6 +247,34 @@ fn incident_severity(rule: &Rule, m: &RuleMatch) -> String {
 pub fn assemble(rule: &Rule, m: &RuleMatch, host: &str) -> IncidentDraft {
     let service = m.service.as_deref();
     let window = rule.window_secs;
+    // app_exception: per-fingerprint key (cross-host grouping — the key
+    // comes from the event, not the host), severity and headline from the
+    // first (oldest) event so the exception level drives the incident.
+    if rule.id == "app_exception" {
+        let first = m
+            .events
+            .first()
+            .expect("app_exception match always has a trigger event");
+        return IncidentDraft {
+            key: format!("rule:app_exception:{}", first.key),
+            host_id: host.into(),
+            severity: crate::ingest::severity_wire(first.severity),
+            headline: first.summary.clone(),
+            cause: fill_template(&rule.cause, host, service)
+                .replace("{window}", &window.to_string()),
+            actions: rule.actions.clone(),
+            affected: {
+                let mut v = vec![host.to_string()];
+                for e in &m.events {
+                    if !v.contains(&e.key) {
+                        v.push(e.key.clone());
+                    }
+                }
+                v
+            },
+            events: m.events.clone(),
+        };
+    }
     IncidentDraft {
         key: format!("rule:{}:{}", rule.id, host),
         host_id: host.into(),
@@ -398,48 +459,54 @@ pub async fn scan_and_absorb(
             if rule.is_fallback {
                 continue;
             }
-            let Some(m) = match_rule(rule, &host_events, now, &host, &matched_event_ids) else {
-                continue;
-            };
-            let draft = assemble(rule, &m, &host);
-            // claim first: cooldown-suppressed events must NOT re-open as
-            // fallback incidents (they belong to the suppressed key)
-            for e in &m.events {
-                matched_event_ids.insert(e.id.clone());
-            }
-            // cooldown: a resolved incident with this key blocks re-open
-            if recently_resolved(pool, &draft.key, now, rule.cooldown_secs * 1000).await? {
-                continue;
-            }
-            let inc = incidents::create_incident(
-                pool,
-                &draft.key,
-                &draft.host_id,
-                &draft.severity,
-                &draft.headline,
-                &draft.cause,
-                &draft.actions,
-                &draft.affected,
-            )
-            .await?;
-            let new_links = incidents::link_events(pool, &inc.id, &draft.events).await?;
-            if new_links > 0 {
-                incidents::touch_incident(pool, &inc.id).await?;
-                // severity may have risen (e.g. first-seen root login
-                // absorbs a Critical event into a Warning incident)
-                let worst = draft
-                    .events
-                    .iter()
-                    .map(|e| e.severity)
-                    .max()
-                    .unwrap_or(wt_common::Severity::Warning);
-                if worst > wt_common::Severity::Warning {
-                    incidents::raise_severity(pool, &inc.id, &crate::ingest::severity_wire(worst))
-                        .await?;
+            // while-let: app_exception matches ONCE PER FINGERPRINT (the
+            // events are claimed between iterations); every other rule
+            // matches at most once per host, so this is a no-op for them.
+            while let Some(m) = match_rule(rule, &host_events, now, &host, &matched_event_ids) {
+                let draft = assemble(rule, &m, &host);
+                // claim first: cooldown-suppressed events must NOT re-open as
+                // fallback incidents (they belong to the suppressed key)
+                for e in &m.events {
+                    matched_event_ids.insert(e.id.clone());
                 }
-                let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
-                if seen.insert(inc.id.clone()) {
-                    changed.push(inc);
+                // cooldown: a resolved incident with this key blocks re-open
+                if recently_resolved(pool, &draft.key, now, rule.cooldown_secs * 1000).await? {
+                    continue;
+                }
+                let inc = incidents::create_incident(
+                    pool,
+                    &draft.key,
+                    &draft.host_id,
+                    &draft.severity,
+                    &draft.headline,
+                    &draft.cause,
+                    &draft.actions,
+                    &draft.affected,
+                )
+                .await?;
+                let new_links = incidents::link_events(pool, &inc.id, &draft.events).await?;
+                if new_links > 0 {
+                    incidents::touch_incident(pool, &inc.id).await?;
+                    // severity may have risen (e.g. first-seen root login
+                    // absorbs a Critical event into a Warning incident)
+                    let worst = draft
+                        .events
+                        .iter()
+                        .map(|e| e.severity)
+                        .max()
+                        .unwrap_or(wt_common::Severity::Warning);
+                    if worst > wt_common::Severity::Warning {
+                        incidents::raise_severity(
+                            pool,
+                            &inc.id,
+                            &crate::ingest::severity_wire(worst),
+                        )
+                        .await?;
+                    }
+                    let inc = incidents::fetch_incident(pool, &inc.id).await?.unwrap();
+                    if seen.insert(inc.id.clone()) {
+                        changed.push(inc);
+                    }
                 }
             }
         }
@@ -1311,5 +1378,67 @@ actions = ["Review the change to the affected file", "Roll back the latest confi
             changed[0].key.starts_with("rule:server_unreachable"),
             "single host stays per-host"
         );
+    }
+
+    #[tokio::test]
+    async fn app_exception_groups_by_fingerprint() {
+        let p = pool().await;
+        let fp = crate::errors::fingerprint("api", "ValueError", &[("app.py".into(), 42)]);
+        let evs = vec![
+            ev(
+                "x-1",
+                1_000,
+                EventKind::AppException,
+                Severity::Critical,
+                &format!("ex:api:{}", fp),
+            ),
+            ev(
+                "x-2",
+                2_000,
+                EventKind::AppException,
+                Severity::Critical,
+                &format!("ex:api:{}", fp),
+            ),
+        ];
+        crate::ingest::store_events(&p, &evs).await.unwrap();
+        let changed = scan_and_absorb(&p, &default_rules(), 10_000).await.unwrap();
+        assert_eq!(changed.len(), 1, "one incident per fingerprint");
+        assert_eq!(changed[0].key, format!("rule:app_exception:ex:api:{}", fp));
+        assert_eq!(changed[0].severity, "Critical");
+        assert_eq!(changed[0].timeline.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn app_exception_level_propagates_and_splits_fingerprints() {
+        let p = pool().await;
+        let fp_a = crate::errors::fingerprint("api", "ValueError", &[("app.py".into(), 42)]);
+        let fp_b = crate::errors::fingerprint("api", "TypeError", &[("app.py".into(), 99)]);
+        let evs = vec![
+            ev(
+                "x-1",
+                1_000,
+                EventKind::AppException,
+                Severity::Warning,
+                &format!("ex:api:{}", fp_a),
+            ),
+            ev(
+                "x-2",
+                1_000,
+                EventKind::AppException,
+                Severity::Critical,
+                &format!("ex:api:{}", fp_b),
+            ),
+        ];
+        crate::ingest::store_events(&p, &evs).await.unwrap();
+        let changed = scan_and_absorb(&p, &default_rules(), 10_000).await.unwrap();
+        assert_eq!(
+            changed.len(),
+            2,
+            "different fingerprints → different incidents"
+        );
+        let warn = changed.iter().find(|i| i.severity == "Warning").unwrap();
+        assert_eq!(warn.key, format!("rule:app_exception:ex:api:{}", fp_a));
+        let crit = changed.iter().find(|i| i.severity == "Critical").unwrap();
+        assert_eq!(crit.key, format!("rule:app_exception:ex:api:{}", fp_b));
     }
 }
