@@ -3,101 +3,69 @@
 [![CI](https://github.com/vrlda/watchtower/actions/workflows/ci.yml/badge.svg)](https://github.com/vrlda/watchtower/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Production server autopilot: one agent that watches the health and security of your server.
-See `docs/specs/product-spec.md` and `docs/specs/architecture.md`.
+Production server autopilot. One small agent watches the health and security of a server; a control plane correlates the signals into incidents and tells you about them. No per-seat pricing, no cloud dependency — it runs on your own box or VPS.
 
-## Build
+## What it watches
 
-    cargo build --release
+| Area | Signals |
+|---|---|
+| **Host health** | CPU/memory/swap/load spikes, network-device errors, disk + inode exhaustion, read-only filesystems, OOM kills, kernel panics, clock changes, reboots |
+| **Services** | systemd state changes, crash loops, unexpected restarts, app error-rate spikes (journald patterns) |
+| **Security** | SSH logins, failures, brute-force, first-seen IPs, root/sudo activity, file changes (inotify), authorized_keys edits, new users, package installs, cron/systemd persistence changes, /tmp + /dev/shm execution, reverse-shell patterns, unexpected executables |
+| **Network** | New listening ports (TCP + UDP), new outbound destinations, connection-rate spikes, port scans |
+| **Applications** | Access-log parsing (5xx rate, request-rate spikes), TLS certificate expiry, Docker containers (state + crash loops), **in-app exception capture** with SDKs for Rust, Python, Node, and Go |
+| **Uptime** | External HTTP(S) probes with failure thresholds |
 
-## M1 status
+## How it works
 
-- Sensors: resource (mem, swap, load, netdev, cpu spikes), systemd service states + crash loops
-- Security sensors (M3): SSH login/auth + brute-force + first-seen IPs (journald),
-  root/sudo activity (journald), file-integrity (inotify, Linux), network flow
-  (new ports, new outbound destinations, connection-rate spikes)
-- M5 sensors: reboot detection, app error-rate spikes (journald patterns),
-  docker containers (states + crash loops), TLS certificate expiry
-- Local engine: rolling-median spike detection, dedup windows, threshold rules
-- Telemetry: batched POST, JSONL disk spool + ack-based drain, heartbeat
-- CLI: `check` (one-shot), `run` (continuous), config at `/etc/watchtower/agent.toml`
-- Deploy: `deploy/watchtower-agent.service`
+- **Agent** (`watchtower-agent`) — a single binary per host. Polls systemd/journald/procfs, batches events, POSTs them to the control plane. JSONL disk spool with ack-based drain survives server outages; state (seen IPs, journal cursor, baselines) persists across restarts.
+- **Server** (`watchtower-server`) — ingests events, runs rule-based correlation, groups them into **incidents**, and notifies. SQLite by default, Postgres supported. Web UI included. An incident absorbs follow-up events (one timeline per problem) with a re-notify throttle.
+- **Exception capture** — apps POST exceptions to `/v1/errors`; the server fingerprints them (type + service + first frames) and each recurring bug becomes one incident — same list, timeline, resolve and notify flow as infra events.
 
-## Try it (no control plane required)
+## Quick start
 
-    cargo build --release
-    ./target/release/watchtower-agent --config /dev/null check
+```bash
+cargo build --release
 
-The control plane (`watchtower-server`: incidents, correlation, notifications) is M2+.
+# agent, one-shot diagnostics on this host:
+./target/release/watchtower-agent check
 
-## M2 status
+# control plane (server.toml: listen, db_url, auth_token, [[probes]]):
+./target/release/watchtower-server --config /etc/watchtower/server.toml
+```
 
-Control plane core (`watchtower-server`):
+Linux install (binary, systemd unit, config, self-registration):
 
-    cargo build --release
-    # server.toml: listen, db_url, auth_token, [[probes]] entries
-    ./target/release/watchtower-server --config /etc/watchtower/server.toml
+```bash
+INSTALL_URL=https://.../watchtower-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+  INSTALL_SHA256=<from SHA256SUMS> \
+  SERVER_URL=http://control.example.com TOKEN=secret \
+  sudo sh scripts/install.sh
+```
 
-- API: `POST /v1/telemetry` (idempotent per event id), `POST /v1/heartbeat`,
-  `GET /v1/hosts`, `GET /v1/events?host=&kind=&severity=&since=&limit=`
-  (ordered by ts desc, id — never arrival order)
-- Uptime probes: `[[probes]] url=... interval_secs=30 fail_threshold=3` →
-  Critical `HostUnreachable` events after consecutive failures
-- Web UI at `http://127.0.0.1:8787/` (token prompt; evidence expandable).
-  Serve from the repo root, or set `WATCHTOWER_UI_DIR` for installed deploys.
-- Integration check: `./scripts/integration-test.sh`
-- Per-host tokens: `[host_tokens] host-a = "token"` in server.toml — an
-  agent presenting a per-host token is attributed to that host (its payload
-  host_id is overridden; spoofing requires the token).
-- M3 security sensors: see M1 status above. Config keys: `watch_paths`,
-  `ssh_brute_threshold`, `ssh_brute_window_secs` in agent.toml.
-- M5 config keys: `error_patterns`, `error_window_secs`, `error_threshold`,
-  `docker_enabled`, `cert_paths`, `cert_warn_days`, `cert_crit_days`,
-  `cert_scan_interval_secs` in agent.toml
+The agent runs as a dedicated `watchtower` user, `NoNewPrivileges=yes`, no capabilities.
 
-Incidents, correlation, notifications: M4.
+## Web UI
 
-### Telegram notifications
+`http://<server>:8787/` — hosts, events, incidents (timeline, evidence, acknowledge/resolve). Token-prompted, static files served by the server itself (`WATCHTOWER_UI_DIR` for installed deploys).
 
-    TELEGRAM_BOT_TOKEN=<bot token> watchtower-server --config server.toml
-    # optional: pin the target chat (multi-server setups)
-    TELEGRAM_CHAT_ID=123456789 watchtower-server --config server.toml
-    # optional: require a password before a chat can register
-    TELEGRAM_BOT_PASSWORD=<secret> watchtower-server --config server.toml
+## Notifications
 
-Message the bot once (e.g. /start) — without TELEGRAM_CHAT_ID the chat is
-auto-discovered from the bot's first update. With TELEGRAM_CHAT_ID the chat
-is pinned and no discovery is needed — every server reports into the same
-channel. All Critical and Warning incidents notify to that single channel
-by default (routing is editable in server.toml `[notify.routing]`).
+Telegram and generic webhook (routing editable in `server.toml` `[notify.routing]`). Critical/Warning incidents notify by default; the same incident re-notifies at most once per `notify_min_interval_secs` (default 60s).
 
-With a password set, message the bot /start — it replies asking for the
-password; send it and the chat is registered. Without a password, the
-first chat to message the bot becomes the target (anyone who finds the
-bot could register — set a password in shared deployments).
+```bash
+TELEGRAM_BOT_TOKEN=<bot token> watchtower-server --config server.toml
+# optional: pin the target chat (multi-server setups share one channel)
+TELEGRAM_CHAT_ID=123456789 watchtower-server --config server.toml
+# optional: require a password before a chat can register
+TELEGRAM_BOT_PASSWORD=<secret> watchtower-server --config server.toml
+```
 
-Multiple servers: run one `watchtower-server` per site, each with the same
-bot token (+ optional chat id) — incidents from every site land in the one
-Telegram chat.
+Message the bot `/start` (with a password set, the bot asks for it and only then registers the chat). Without a chat id, the first chat to message the bot becomes the target. Run one server per site with the same bot token to route every site into one Telegram chat.
 
-### Exception capture
+## Exception capture SDKs
 
-Applications report exceptions to the server; the server fingerprints them
-(type + service + first 3 frames' file:line) and groups each recurring bug
-into one incident — same list, timeline, resolve and notify flow as infra
-events.
-
-Curl reference (any language):
-
-    curl -fsS -X POST http://SERVER:18788/v1/errors \
-      -H "Authorization: Bearer $WATCHTOWER_TOKEN" \
-      -H "Content-Type: application/json" \
-      -d '{"host_id":"web-1","service":"api","environment":"prod",
-           "exception":{"type":"ValueError","message":"bad input","level":"error",
-           "frames":[{"file":"app.py","line":42,"function":"validate"}]}}'
-
-Levels: fatal|error → Critical, warning → Warning, info|debug → Info.
-Grouping: type + service + first 3 frames' file:line.
+Zero-dependency, config via `WATCHTOWER_ENDPOINT` / `WATCHTOWER_TOKEN` / `WATCHTOWER_HOST_ID` / `WATCHTOWER_SERVICE` / `WATCHTOWER_ENVIRONMENT`:
 
 | Language | Location | Test |
 |---|---|---|
@@ -106,58 +74,64 @@ Grouping: type + service + first 3 frames' file:line.
 | Node | `sdk/node/watchtower.js` | `node --test sdk/node/test.js` |
 | Go | `sdk/go/watchtower.go` | `cd sdk/go && go test ./...` |
 
-Python/Node/Go SDKs are single-file, zero-dependency; config via the
-`WATCHTOWER_*` env vars; Python's `capture_exception()` grabs the current
-exception. Non-goals: breadcrumbs, session replay, APM, release tracking.
+Python's `capture_exception()` grabs the current exception; Rust adds `capture_panic()`. Any language can POST directly (curl reference in the README below, section "API"). Levels: `fatal`/`error` → Critical, `warning` → Warning, `info`/`debug` → Info. Non-goals: breadcrumbs, session replay, APM, release tracking.
 
-### Config reference
+## API
 
-Agent (`agent.toml`) — full-batch keys:
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/telemetry` | Agent event batches (idempotent per event id) |
+| `POST /v1/heartbeat` | Host registration/heartbeat |
+| `POST /v1/errors` | App exception capture (fingerprint-grouped) |
+| `GET /v1/hosts` | Host registry |
+| `GET /v1/events?host=&kind=&severity=&since=&limit=` | Event queries (ordered by ts, id — never arrival order) |
+| `GET /v1/incidents` | Incidents with timelines |
 
-- `state_file` — JSONL state (seen IPs, journal cursor, baselines) restored across restarts; empty = no persistence
-- `watch_authorized_keys` — FIM-watch `/root/.ssh/authorized_keys` and `/home/*/.ssh/authorized_keys`
-- `access_log_paths` — access logs parsed for request-volume / 5xx spikes
-- `request_rate_threshold` — total requests per window that fires `RequestRateSpike`
-- `request_rate_window_secs` — request-rate window length
-- `process_scan_interval_secs` — `/proc` snapshot cadence (suspicious/unexpected-exec heuristics)
-- `scan_threshold` — distinct new remote connections within the window that fire `PortScanSpike`
-- `scan_window_secs` — port-scan window length
+Curl exception reference:
 
-Server (`server.toml`):
+```bash
+curl -fsS -X POST http://SERVER:8787/v1/errors \
+  -H "Authorization: Bearer $WATCHTOWER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"host_id":"web-1","service":"api","environment":"prod",
+       "exception":{"type":"ValueError","message":"bad input","level":"error",
+       "frames":[{"file":"app.py","line":42,"function":"validate"}]}}'
+```
 
-- `db_url` — also accepts `postgres://` (Postgres via sqlx; sqlite is the default; CI runs a Postgres job)
-- `notify_min_interval_secs` — min interval between re-notifications of the same incident
+## Configuration
 
-## Install (Linux)
+Agent (`agent.toml`): `state_file`, `watch_paths`, `watch_authorized_keys`, `ssh_brute_threshold`, `ssh_brute_window_secs`, `error_patterns`, `error_window_secs`, `error_threshold`, `docker_enabled`, `cert_paths`, `cert_warn_days`, `cert_crit_days`, `cert_scan_interval_secs`, `access_log_paths`, `request_rate_threshold`, `request_rate_window_secs`, `process_scan_interval_secs`, `scan_threshold`, `scan_window_secs`.
 
-    # release build with checksum:
-    INSTALL_URL=https://.../watchtower-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
-      INSTALL_SHA256=<from SHA256SUMS> \
-      SERVER_URL=http://control.example.com TOKEN=secret \
-      sudo sh scripts/install.sh
+Server (`server.toml`): `listen`, `db_url` (sqlite default; `postgres://` supported), `auth_token`, `host_tokens` (per-host tokens — an agent presenting one is attributed to that host, payload `host_id` overridden), `notify_min_interval_secs`, `[[probes]]` (uptime checks), `[notify.routing]`.
 
-    # or from a local build:
-    WATCHTOWER_BINARY=target/release/watchtower-agent \
-      SERVER_URL=http://control.example.com TOKEN=secret \
-      sudo sh scripts/install.sh
+## Development
 
-Build a release: `TARGETS=x86_64-unknown-linux-gnu sh scripts/release.sh`
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+./scripts/integration-test.sh        # end-to-end against a live server
+bash -n scripts/*.sh                 # shell syntax
+python3 sdk/python/test_watchtower.py && node --test sdk/node/test.js
+cd sdk/go && go test ./...
+```
 
-The installer: installs the binary, writes /etc/watchtower/agent.toml,
-installs + starts the systemd unit, and prints the discovery checklist.
-The host self-registers on the first heartbeat.
+On a Linux box with systemd (the tests exercise journald/systemctl/procfs):
 
-The agent runs as the dedicated `watchtower` user with journal/docker group
-access (systemd-journal, adm, docker), no capabilities, and
-`NoNewPrivileges=yes`. On hosts without docker, remove the docker group from
-SupplementaryGroups in the unit (a missing group prevents the unit from
-starting) — the install.sh path handles it automatically.
-Certificate paths under `/etc/ssl/private` need
-group access — set `cert_paths` to readable locations if needed.
+```bash
+sudo env "PATH=$PATH" bash scripts/verify-linux.sh
+```
 
-## Known M1 limitations
+CI runs all of the above (ubuntu + macos + Postgres + SDK jobs). Plans for every feature batch live in `docs/superpowers/plans/`; the spec and architecture are in `docs/specs/`.
 
-- Spool is capped at 10 MB (drops new batches with a loud log beyond that; backoff is a fixed 30 s heartbeat-throttle — exponential backoff is M2)
-- No fsync on spool append (process crash is safe; power loss may lose the last batch)
-- `check` never drains the spool (one-shot diagnostics by design)
-- systemctl timeout path is untested (kill-on-timeout logic is covered only by review)
+## Known limitations
+
+- No breadcrumbs/session replay/APM/release tracking (exception capture is grouped incidents, not a full Sentry replacement)
+- No Kubernetes or Windows support; single-region control plane (multi-site = one server per site, one shared Telegram channel)
+- Spool capped at 10 MB (drops batches with a loud log beyond that); no fsync on spool append (power loss may lose the last batch)
+- Release binaries are checksummed, not signed; aarch64 cross-builds need a C toolchain (CI builds x86_64)
+- Heuristic detectors (reverse shells, unexpected executables, port scans) are best-effort, not kernel-level guarantees
+
+## License
+
+MIT — see [LICENSE](LICENSE).
