@@ -1,8 +1,7 @@
 # Watchtower
 
-[![CI](https://github.com/YOUR_REPO/watchtower/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_REPO/watchtower/actions/workflows/ci.yml)
+[![CI](https://github.com/vrlda/umc/actions/workflows/ci.yml/badge.svg)](https://github.com/vrlda/umc/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-<!-- TODO: replace YOUR_REPO with the actual GitHub repo path once the repo is published -->
 
 Production server autopilot: one agent that watches the health and security of your server.
 See `docs/specs/product-spec.md` and `docs/specs/architecture.md`.
