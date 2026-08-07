@@ -101,9 +101,9 @@ pub async fn handle_errors(
         .extensions()
         .get::<crate::auth::ResolvedHost>()
         .and_then(|h| h.0.clone());
-    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let Ok(body_bytes) = axum::body::to_bytes(request.into_body(), MAX_ERROR_BODY + 1).await else {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    };
     if body_bytes.len() > MAX_ERROR_BODY {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -190,7 +190,12 @@ pub async fn handle_errors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
     use wt_common::Severity;
+
+    use crate::app::{build_app, AppState};
 
     #[test]
     fn fingerprint_is_deterministic_and_discriminating() {
@@ -259,5 +264,26 @@ mod tests {
             "unknown → loud"
         );
         assert_eq!(severity_for(""), Severity::Critical);
+    }
+
+    #[tokio::test]
+    async fn errors_rejects_oversized_body() {
+        let app = build_app(AppState::for_tests().await).await;
+        let big = "x".repeat(2 * 1024 * 1024);
+        assert!(big.len() > MAX_ERROR_BODY, "body must exceed the cap");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/errors")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(big))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

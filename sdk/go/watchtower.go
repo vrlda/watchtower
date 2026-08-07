@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -35,7 +36,7 @@ type Client struct {
 func New() *Client {
 	host, _ := os.Hostname()
 	return &Client{
-		Endpoint:    os.Getenv("WATCHTOWER_ENDPOINT"),
+		Endpoint:    strings.TrimRight(os.Getenv("WATCHTOWER_ENDPOINT"), "/"),
 		Token:       os.Getenv("WATCHTOWER_TOKEN"),
 		HostID:      envOr("WATCHTOWER_HOST_ID", host),
 		Service:     envOr("WATCHTOWER_SERVICE", "app"),

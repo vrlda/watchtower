@@ -105,7 +105,7 @@ Grouping: type + service + first 3 frames' file:line.
 | Rust | `crates/watchtower-sdk` | `cargo test -p watchtower-sdk` |
 | Python | `sdk/python/watchtower.py` | `python3 sdk/python/test_watchtower.py` |
 | Node | `sdk/node/watchtower.js` | `node --test sdk/node/test.js` |
-| Go | `sdk/go/watchtower.go` | `go test ./sdk/go/...` |
+| Go | `sdk/go/watchtower.go` | `cd sdk/go && go test ./...` |
 
 Python/Node/Go SDKs are single-file, zero-dependency; config via the
 `WATCHTOWER_*` env vars; Python's `capture_exception()` grabs the current
