@@ -98,9 +98,18 @@ Curl reference (any language):
            "frames":[{"file":"app.py","line":42,"function":"validate"}]}}'
 
 Levels: fatal|error → Critical, warning → Warning, info|debug → Info.
-Grouping: type + service + first 3 frames' file:line. SDKs: Rust
-(crates/watchtower-sdk). Non-goals: breadcrumbs, session replay, APM,
-release tracking.
+Grouping: type + service + first 3 frames' file:line.
+
+| Language | Location | Test |
+|---|---|---|
+| Rust | `crates/watchtower-sdk` | `cargo test -p watchtower-sdk` |
+| Python | `sdk/python/watchtower.py` | `python3 sdk/python/test_watchtower.py` |
+| Node | `sdk/node/watchtower.js` | `node --test sdk/node/test.js` |
+| Go | `sdk/go/watchtower.go` | `go test ./sdk/go/...` |
+
+Python/Node/Go SDKs are single-file, zero-dependency; config via the
+`WATCHTOWER_*` env vars; Python's `capture_exception()` grabs the current
+exception. Non-goals: breadcrumbs, session replay, APM, release tracking.
 
 ### Config reference
 
