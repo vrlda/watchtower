@@ -86,6 +86,9 @@ pub enum EventKind {
     SuspiciousExec,
     /// An executable from a non-system path not seen in the baseline (Warning).
     UnexpectedExec,
+    /// An in-app exception captured from an SDK via POST /v1/errors (severity
+    /// derived from the exception level; incidents grouped by fingerprint).
+    AppException,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,5 +469,11 @@ mod tests {
     fn config_has_p3t8_fields() {
         let cfg = Config::default();
         assert_eq!(cfg.process_scan_interval_secs, 30);
+    }
+
+    #[test]
+    fn exception_kind_serializes() {
+        let v: serde_json::Value = serde_json::to_value(EventKind::AppException).unwrap();
+        assert_eq!(v, "AppException");
     }
 }
