@@ -109,9 +109,28 @@ mod tests {
                     .and_then(|_| listener.accept())
                 {
                     listener.set_nonblocking(false).ok();
-                    let mut buf = [0u8; 16384];
-                    let n = stream.read(&mut buf).unwrap();
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while std::time::Instant::now() < deadline {
+                        match stream.read(&mut tmp) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                        let text = String::from_utf8_lossy(&buf);
+                        if let Some(head_end) = text.find("\r\n\r\n") {
+                            let content_len = text[..head_end]
+                                .lines()
+                                .find_map(|l| l.strip_prefix("Content-Length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if head_end + 4 + content_len <= buf.len() {
+                                break;
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    let req = String::from_utf8_lossy(&buf).to_string();
                     let body_start = req.find("\r\n\r\n").unwrap() + 4;
                     let body: serde_json::Value = serde_json::from_str(&req[body_start..]).unwrap();
                     assert!(

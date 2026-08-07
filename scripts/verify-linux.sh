@@ -9,6 +9,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FAILED=0
 
+# a stale persisted-state file from a manual agent run would seed the journal
+# cursor at real-now and make the engine tests' fixture lines get skipped
+rm -f /var/lib/watchtower/agent-state.json
+
 step() { echo; echo "==> $1"; }
 
 step "build + tests"
@@ -33,7 +37,7 @@ auth_token = "verify-token"
 EOF
 "$ROOT/target/release/watchtower-server" --config /tmp/watchtower-verify-server.toml &
 VERIFY_SERVER_PID=$!
-trap 'kill "$VERIFY_SERVER_PID" 2>/dev/null || true; systemctl stop watchtower-agent 2>/dev/null || true; rm -f /tmp/watchtower-verify-server.toml /tmp/watchtower-verify.db /tmp/watchtower-install.txt' EXIT
+trap 'kill "$VERIFY_SERVER_PID" 2>/dev/null || true; systemctl stop watchtower-agent 2>/dev/null || true; rm -f /tmp/watchtower-verify-server.toml /tmp/watchtower-verify.db /tmp/watchtower-install.txt /var/lib/watchtower/agent-state.json' EXIT
 sleep 1
 
 SERVER_URL="http://127.0.0.1:18789" TOKEN="verify-token" \
