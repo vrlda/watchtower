@@ -44,5 +44,9 @@ UNIT
 done
 
 echo "==> checksums"
-(cd "$DIST" && shasum -a 256 watchtower-*.tar.gz > SHA256SUMS)
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$DIST" && sha256sum watchtower-*.tar.gz > SHA256SUMS)
+else
+  (cd "$DIST" && shasum -a 256 watchtower-*.tar.gz > SHA256SUMS)
+fi
 cat "$DIST/SHA256SUMS"
