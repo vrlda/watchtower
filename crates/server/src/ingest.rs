@@ -256,6 +256,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest_rejects_unknown_token() {
+        let app = build_app(AppState::for_tests().await).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/telemetry")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer wrong-token")
+                    .body(Body::from(batch_body(1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn ingest_rejects_empty_batch() {
         let app = build_app(AppState::for_tests().await).await;
         let resp = app

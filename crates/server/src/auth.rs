@@ -26,6 +26,14 @@ pub fn resolve_host_id(auth: &Auth, bearer: &str) -> Option<String> {
         .map(|(h, _)| h.clone())
 }
 
+/// True only for the configured shared token or one of the configured
+/// per-host tokens. `None` from `resolve_host_id` is ambiguous: it means
+/// either the shared token or an unknown token, so callers must not use it
+/// as an authentication decision by itself.
+fn is_authorized(auth: &Auth, bearer: &str, resolved_host: &Option<String>) -> bool {
+    bearer == auth.shared || resolved_host.is_some()
+}
+
 /// Host identity resolved from the bearer token (None = shared token).
 #[derive(Clone, Debug)]
 pub struct ResolvedHost(pub Option<String>);
@@ -44,6 +52,9 @@ pub async fn require_token(
     match bearer {
         Some(tok) if !tok.is_empty() => {
             let host = resolve_host_id(&auth, tok);
+            if !is_authorized(&auth, tok, &host) {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
             // attach the resolved host to the extensions for the handlers
             request.extensions_mut().insert(ResolvedHost(host));
             Ok(next.run(request).await)
@@ -77,5 +88,12 @@ mod tests {
             Some("host-a")
         );
         assert_eq!(resolve_host_id(&auth(), "unknown"), None);
+    }
+
+    #[test]
+    fn unknown_token_is_not_authorized() {
+        let auth = auth();
+        let host = resolve_host_id(&auth, "unknown");
+        assert!(!is_authorized(&auth, "unknown", &host));
     }
 }

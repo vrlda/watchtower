@@ -57,9 +57,30 @@ fn resolve_host_id(cfg: &Config) -> String {
     }
 }
 
+/// Agent bearer tokens must not traverse a remote connection in clear text.
+/// Keep plain HTTP available only for local development and test control
+/// planes, where traffic never leaves the host.
+fn is_safe_server_url(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(authority) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = authority.split('/').next().unwrap_or_default();
+    matches!(authority, "localhost" | "127.0.0.1" | "[::1]")
+        || authority.starts_with("localhost:")
+        || authority.starts_with("127.0.0.1:")
+        || authority.starts_with("[::1]:")
+}
+
 fn main() {
     let cli = Cli::parse();
     let cfg = load_config(&cli.config);
+    if !cfg.server_url.is_empty() && !is_safe_server_url(&cfg.server_url) {
+        eprintln!("server_url must use https (http is allowed only for localhost)");
+        std::process::exit(1);
+    }
     let host_id = resolve_host_id(&cfg);
     let procfs = procfs::ProcFs::new(PathBuf::from("/proc"));
     let runners = cmd::Runners::real();
@@ -214,4 +235,19 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_server_url;
+
+    #[test]
+    fn permits_https_and_loopback_http_only() {
+        assert!(is_safe_server_url("https://control.example.com"));
+        assert!(is_safe_server_url("http://127.0.0.1:8787"));
+        assert!(is_safe_server_url("http://localhost:8787"));
+        assert!(is_safe_server_url("http://[::1]:8787"));
+        assert!(!is_safe_server_url("http://control.example.com"));
+        assert!(!is_safe_server_url("ftp://control.example.com"));
+    }
 }
