@@ -79,7 +79,7 @@ if [ -z "$INSTALL_URL" ] && [ -z "$INSTALL_SHA256" ] && [ -z "$BINARY_SRC" ]; th
   [ -n "$TAG" ] || { echo "could not parse the latest release tag" >&2; exit 1; }
   ARCH="$(uname -m)"
   case "$ARCH" in
-    x86_64|amd64) TARGET="x86_64-unknown-linux-gnu" ;;
+    x86_64|amd64) TARGET="x86_64-unknown-linux-musl" ;;
     aarch64|arm64)
       echo "aarch64 builds are not published yet (CI builds x86_64) — build from source instead" >&2
       exit 1

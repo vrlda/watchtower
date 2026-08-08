@@ -5,16 +5,15 @@ on:
 
 jobs:
   build:
-    # x86_64 only: release.sh builds the C deps (ring, etc.) with the
-    # runner's native gcc. aarch64-unknown-linux-gnu needs a cross C
-    # toolchain (e.g. the `cross` crate or a zig wrapper) — add the
-    # target back once that is wired up.
+    # musl build = fully static binaries that run on any Linux (glibc
+    # builds from the 24.04 runner fail on older distros — verified live).
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-gnu]
+        target: [x86_64-unknown-linux-musl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
