@@ -50,6 +50,17 @@ if [ -z "$SERVER_URL" ] || [ -z "$TOKEN" ]; then
   exit 1
 fi
 
+# Bearer credentials travel with every agent request. HTTP is safe only for a
+# local development control plane; remote deployments must terminate TLS.
+case "$SERVER_URL" in
+  https://*) ;;
+  http://localhost|http://localhost:*|http://localhost/*|http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*|http://[[]::1[]]|http://[[]::1[]]:*|http://[[]::1[]]/*) ;;
+  *)
+    echo "server URL must use https (http is allowed only for localhost)" >&2
+    exit 1
+    ;;
+esac
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "must run as root" >&2
   exit 1

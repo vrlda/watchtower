@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "watchtower-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "glob",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "watchtower-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "watchtower-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -2404,7 +2404,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "wt-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

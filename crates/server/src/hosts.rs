@@ -1,4 +1,4 @@
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -11,7 +11,14 @@ use crate::app::AppState;
 /// POST /v1/heartbeat — upsert host, keep version, refresh last-seen. Seen-times
 /// are server-side facts (liveness); the agent's clock is not trusted. The
 /// watchdog (missing heartbeat → incident) is M4.
-pub async fn heartbeat(State(state): State<AppState>, Json(hb): Json<Heartbeat>) -> Response {
+pub async fn heartbeat(
+    State(state): State<AppState>,
+    Extension(resolved_host): Extension<crate::auth::ResolvedHost>,
+    Json(mut hb): Json<Heartbeat>,
+) -> Response {
+    if let Some(host_id) = resolved_host.0 {
+        hb.host_id = host_id;
+    }
     match upsert_host(&state.pool, &hb).await {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => {
@@ -181,5 +188,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn per_host_token_overrides_heartbeat_host_id() {
+        let state = AppState::for_tests().await;
+        let pool = state.pool.clone();
+        let app = build_app(state).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/heartbeat")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer host-a-token")
+                    .body(Body::from(hb_body("spoofed-host", 1000, 0)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let host: (String,) = sqlx::query_as("SELECT host_id FROM hosts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(host.0, "host-a");
     }
 }
