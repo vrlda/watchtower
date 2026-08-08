@@ -147,7 +147,7 @@ On a Linux box with systemd (the tests exercise journald/systemctl/procfs):
 sudo env "PATH=$PATH" bash scripts/verify-linux.sh
 ```
 
-CI runs all of the above (ubuntu + macos + Postgres + SDK jobs). Plans for every feature batch live in `docs/superpowers/plans/`; the spec and architecture are in `docs/specs/`.
+CI runs all of the above (ubuntu + macos + Postgres + SDK jobs).
 
 ## License
 
